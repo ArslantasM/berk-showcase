@@ -2,7 +2,7 @@
 
 Bu doküman, iAts antenna tracker için ESP32 tabanlı BERK implementasyonunun donanım bağlantılarını açıklar.
 
-## 🔌 ESP32 Pin Bağlantıları
+##  ESP32 Pin Bağlantıları
 
 ### Genel Bakış
 
@@ -30,7 +30,7 @@ Bu doküman, iAts antenna tracker için ESP32 tabanlı BERK implementasyonunun d
                            └─────────────────────┘
 ```
 
-## 📋 Bileşen Listesi
+##  Bileşen Listesi
 
 ### Ana Bileşenler
 
@@ -59,7 +59,7 @@ Bu doküman, iAts antenna tracker için ESP32 tabanlı BERK implementasyonunun d
 | SD Kart Modülü | Veri kaydı (SPI) |
 | Buzzer | Sesli uyarılar |
 
-## 🔗 Detaylı Bağlantılar
+##  Detaylı Bağlantılar
 
 ### I2C Bus (3.3V)
 
@@ -133,7 +133,7 @@ yapı PinConfig yap
 son
 ```
 
-## 🏗️ Mekanik Montaj
+##  Mekanik Montaj
 
 ### Pan-Tilt Mekanizması
 
@@ -161,7 +161,7 @@ son
 - **GPS**: Montaj tabanından en az 10cm uzakta, gökyüzüne açık
 - **ESP32**: Koruyucu kutu içinde, ısıdan uzak
 
-## ⚡ Güç Dağıtımı
+##  Güç Dağıtımı
 
 ```
                     ┌─────────────────────────────────┐
@@ -196,7 +196,7 @@ son
 | Tilt Servo | 200mA | 1500mA |
 | **Toplam** | **530mA** | **~3.6A** |
 
-## 🔧 Montaj Adımları
+##  Montaj Adımları
 
 ### 1. PCB/Breadboard Hazırlığı
 
@@ -230,7 +230,7 @@ son
 3. Seri monitörden logları izleyin
 4. Sensör verilerini doğrulayın
 
-## 📐 PCB Tasarımı (Opsiyonel)
+##  PCB Tasarımı (Opsiyonel)
 
 Prototip aşamasından sonra özel PCB tasarımı için:
 
@@ -251,7 +251,7 @@ Prototip aşamasından sonra özel PCB tasarımı için:
 4. MPU6050'yi titreşimden uzak tutun
 5. HMC5883L'yi motorlardan uzak tutun (manyetik girişim)
 
-## 🛡️ Koruma
+##  Koruma
 
 ### ESD Koruması
 
