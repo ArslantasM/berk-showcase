@@ -1,0 +1,469 @@
+// ============================================================================
+// iAts BERK - İletişim Görevi
+// ============================================================================
+// GPS/Telemetri okuma, Bluetooth iletişim, protokol işleme
+// NMEA, MAVLink, LTM protokol desteği
+// ============================================================================
+
+modül comm_task
+
+kullan config
+kullan protocols::nmea
+kullan protocols::mavlink
+kullan protocols::ltm
+kullan hal::uart
+kullan hal::bt
+kullan hal::timer
+kullan std::sync
+kullan std::string
+
+// ============================================================================
+// İletişim Durumu
+// ============================================================================
+
+özel Protocol = enum {
+    NMEA,
+    MAVLink,
+    LTM,
+    Bilinmeyen
+}
+
+yapı CommState yap
+    // Aktif protokol
+    protocol: Protocol,
+    
+    // GPS verisi
+    gps_lat: kesirli,
+    gps_lon: kesirli,
+    gps_alt: kesirli,
+    gps_speed: kesirli,
+    gps_course: kesirli,
+    gps_satellites: tamsayı,
+    gps_fix: tamsayı,
+    gps_valid: mantıksal,
+    
+    // Buffer'lar
+    rx_buffer: [bayt; 256],
+    rx_index: tamsayı,
+    
+    // Telemetri gönderim
+    tx_counter: tamsayı,
+    
+    // İstatistikler
+    packets_received: tamsayı,
+    packets_sent: tamsayı,
+    parse_errors: tamsayı,
+    
+    // Zaman
+    last_gps_update_ms: tamsayı,
+    last_telemetry_ms: tamsayı
+son
+
+statik değişken state: CommState = CommState {
+    protocol: Protocol::Bilinmeyen,
+    gps_lat: 0.0,
+    gps_lon: 0.0,
+    gps_alt: 0.0,
+    gps_speed: 0.0,
+    gps_course: 0.0,
+    gps_satellites: 0,
+    gps_fix: 0,
+    gps_valid: yanlış,
+    rx_buffer: [0; 256],
+    rx_index: 0,
+    packets_received: 0,
+    packets_sent: 0,
+    parse_errors: 0,
+    last_gps_update_ms: 0,
+    last_telemetry_ms: 0
+}
+
+// ============================================================================
+// Başlatma
+// ============================================================================
+
+açık fonksiyon init() -> Sonuç<(), Hata> yap
+    yaz("[COMM] İletişim modülü başlatılıyor...")
+    
+    // GPS UART başlat
+    uart::init(
+        config::PINS.gps_uart_tx,
+        config::PINS.gps_uart_rx,
+        config::BT.baud_rate
+    )?
+    yaz("[COMM] GPS UART hazır")
+    
+    // Bluetooth başlat
+    bt::init(config::BT.device_name)?
+    bt::set_pin(config::BT.pin_code)
+    yaz("[COMM] Bluetooth hazır")
+    
+    // Protokol otomatik algılama modu
+    state.protocol = Protocol::Bilinmeyen
+    
+    yaz("[COMM] İletişim modülü hazır")
+    dön Tamam(())
+son
+
+// ============================================================================
+// Ana Görev Döngüsü
+// ============================================================================
+
+açık fonksiyon run(
+    target_output: &sync::RingBuffer<TargetData, 8>,
+    status_input: &sync::RingBuffer<SystemStatus, 4>,
+    period_ms: tamsayı
+) yap
+    yaz("[COMM] İletişim görevi başladı")
+    
+    döngü yap
+        olsun start_ms = timer::millis()
+        
+        // UART'tan veri oku
+        uart_oku()
+        
+        // Bluetooth'tan veri oku
+        bt_oku()
+        
+        // Buffer'ı işle
+        eğer state.rx_index > 0 yap
+            protokol_isle(target_output)
+        son
+        
+        // Telemetri gönder (her 100ms'de bir)
+        eğer timer::millis() - state.last_telemetry_ms >= 100 yap
+            eğer olsun Bazı(status) = status_input.read() yap
+                telemetri_gonder(&status)
+            son
+            state.last_telemetry_ms = timer::millis()
+        son
+        
+        // Periyodik bekleme
+        olsun elapsed = timer::millis() - start_ms
+        eğer elapsed < period_ms yap
+            timer::delay_ms(period_ms - elapsed)
+        son
+    son
+son
+
+// ============================================================================
+// UART Okuma
+// ============================================================================
+
+fonksiyon uart_oku() yap
+    döngü yap
+        eşle uart::read_byte() {
+            Bazı(byte) => {
+                eğer state.rx_index < 255 yap
+                    state.rx_buffer[state.rx_index] = byte
+                    state.rx_index = state.rx_index + 1
+                    
+                    // Satır sonu kontrolü
+                    eğer byte == 0x0A yap // '\n'
+                        dön // Buffer'da tam paket var
+                    son
+                yoksa yap
+                    // Buffer taştı, sıfırla
+                    state.rx_index = 0
+                son
+            },
+            Hiçbiri => dön
+        }
+    son
+son
+
+// ============================================================================
+// Bluetooth Okuma
+// ============================================================================
+
+fonksiyon bt_oku() yap
+    döngü yap
+        eşle bt::read_byte() {
+            Bazı(byte) => {
+                eğer state.rx_index < 255 yap
+                    state.rx_buffer[state.rx_index] = byte
+                    state.rx_index = state.rx_index + 1
+                son
+            },
+            Hiçbiri => dön
+        }
+    son
+son
+
+// ============================================================================
+// Protokol İşleme
+// ============================================================================
+
+fonksiyon protokol_isle(output: &sync::RingBuffer<TargetData, 8>) yap
+    // Protokol algıla veya bilinen protokolü kullan
+    olsun protocol = eğer state.protocol == Protocol::Bilinmeyen yap
+        protokol_algila()
+    yoksa yap
+        state.protocol
+    son
+    
+    eşle protocol {
+        Protocol::NMEA => nmea_isle(output),
+        Protocol::MAVLink => mavlink_isle(output),
+        Protocol::LTM => ltm_isle(output),
+        Protocol::Bilinmeyen => {
+            // Protokol tanınamadı
+            state.parse_errors = state.parse_errors + 1
+        }
+    }
+    
+    // Buffer'ı temizle
+    state.rx_index = 0
+son
+
+fonksiyon protokol_algila() -> Protocol yap
+    eğer state.rx_index < 1 yap
+        dön Protocol::Bilinmeyen
+    son
+    
+    olsun first_byte = state.rx_buffer[0]
+    
+    eğer first_byte == 0x24 yap // '$'
+        state.protocol = Protocol::NMEA
+        dön Protocol::NMEA
+    son
+    
+    eğer first_byte == 0xFE yap // MAVLink v1 start
+        state.protocol = Protocol::MAVLink
+        dön Protocol::MAVLink
+    son
+    
+    eğer first_byte == 0xFD yap // MAVLink v2 start
+        state.protocol = Protocol::MAVLink
+        dön Protocol::MAVLink
+    son
+    
+    eğer first_byte == 0x24 yap // LTM '$'
+        eğer state.rx_index > 1 ve state.rx_buffer[1] == 0x54 yap // 'T'
+            state.protocol = Protocol::LTM
+            dön Protocol::LTM
+        son
+    son
+    
+    dön Protocol::Bilinmeyen
+son
+
+// ============================================================================
+// NMEA İşleme
+// ============================================================================
+
+fonksiyon nmea_isle(output: &sync::RingBuffer<TargetData, 8>) yap
+    olsun line = string::from_bytes(&state.rx_buffer[0..state.rx_index])
+    
+    // NMEA checksum doğrula
+    eğer değil nmea::verify_checksum(&line) yap
+        state.parse_errors = state.parse_errors + 1
+        dön
+    son
+    
+    // Cümle tipine göre işle
+    eğer line.starts_with("$GPGGA") veya line.starts_with("$GNGGA") yap
+        nmea_gga_isle(&line, output)
+    yoksa eğer line.starts_with("$GPRMC") veya line.starts_with("$GNRMC") yap
+        nmea_rmc_isle(&line)
+    son
+son
+
+fonksiyon nmea_gga_isle(line: &metin, output: &sync::RingBuffer<TargetData, 8>) yap
+    eşle nmea::parse_gga(line) {
+        Tamam(gga) => {
+            state.gps_lat = gga.latitude
+            state.gps_lon = gga.longitude
+            state.gps_alt = gga.altitude
+            state.gps_fix = gga.fix_quality
+            state.gps_satellites = gga.satellites
+            state.gps_valid = gga.fix_quality > 0
+            
+            eğer state.gps_valid yap
+                state.last_gps_update_ms = timer::millis()
+                state.packets_received = state.packets_received + 1
+                
+                // Target verisini yayınla
+                olsun target = TargetData {
+                    lat: state.gps_lat,
+                    lon: state.gps_lon,
+                    alt: state.gps_alt,
+                    speed: state.gps_speed,
+                    course: state.gps_course,
+                    fix_valid: state.gps_valid,
+                    is_target: doğru,
+                    timestamp_ms: timer::millis()
+                }
+                output.write(target)
+            son
+        },
+        Hata(_) => {
+            state.parse_errors = state.parse_errors + 1
+        }
+    }
+son
+
+fonksiyon nmea_rmc_isle(line: &metin) yap
+    eşle nmea::parse_rmc(line) {
+        Tamam(rmc) => {
+            state.gps_speed = rmc.speed_knots * 0.514444  // Knot -> m/s
+            state.gps_course = rmc.course
+        },
+        Hata(_) => {
+            state.parse_errors = state.parse_errors + 1
+        }
+    }
+son
+
+// ============================================================================
+// MAVLink İşleme
+// ============================================================================
+
+fonksiyon mavlink_isle(output: &sync::RingBuffer<TargetData, 8>) yap
+    eşle mavlink::parse(&state.rx_buffer[0..state.rx_index]) {
+        Tamam(msg) => {
+            eşle msg.msgid {
+                // GPS_RAW_INT (24)
+                24 => {
+                    olsun gps = mavlink::decode_gps_raw_int(&msg)
+                    state.gps_lat = (gps.lat olarak kesirli) / 1e7
+                    state.gps_lon = (gps.lon olarak kesirli) / 1e7
+                    state.gps_alt = (gps.alt olarak kesirli) / 1000.0
+                    state.gps_fix = gps.fix_type olarak tamsayı
+                    state.gps_satellites = gps.satellites_visible olarak tamsayı
+                    state.gps_valid = gps.fix_type >= 2
+                    
+                    eğer state.gps_valid yap
+                        gps_yayinla(output)
+                    son
+                },
+                // GLOBAL_POSITION_INT (33)
+                33 => {
+                    olsun pos = mavlink::decode_global_position_int(&msg)
+                    state.gps_lat = (pos.lat olarak kesirli) / 1e7
+                    state.gps_lon = (pos.lon olarak kesirli) / 1e7
+                    state.gps_alt = (pos.alt olarak kesirli) / 1000.0
+                    state.gps_valid = doğru
+                    gps_yayinla(output)
+                },
+                _ => {} // Diğer mesajları yoksay
+            }
+            state.packets_received = state.packets_received + 1
+        },
+        Hata(_) => {
+            state.parse_errors = state.parse_errors + 1
+        }
+    }
+son
+
+// ============================================================================
+// LTM İşleme
+// ============================================================================
+
+fonksiyon ltm_isle(output: &sync::RingBuffer<TargetData, 8>) yap
+    eşle ltm::parse(&state.rx_buffer[0..state.rx_index]) {
+        Tamam(frame) => {
+            eşle frame.frame_type {
+                // G-Frame (GPS)
+                'G' => {
+                    olsun gps = ltm::decode_g_frame(&frame)
+                    state.gps_lat = (gps.lat olarak kesirli) / 1e7
+                    state.gps_lon = (gps.lon olarak kesirli) / 1e7
+                    state.gps_alt = (gps.alt olarak kesirli) / 100.0
+                    state.gps_speed = gps.speed olarak kesirli
+                    state.gps_fix = gps.fix_type olarak tamsayı
+                    state.gps_satellites = gps.sats olarak tamsayı
+                    state.gps_valid = gps.fix_type >= 2
+                    
+                    eğer state.gps_valid yap
+                        gps_yayinla(output)
+                    son
+                },
+                // A-Frame (Attitude)
+                'A' => {
+                    // Attitude verisi - gerekirse kullan
+                },
+                _ => {} // Diğer frame'leri yoksay
+            }
+            state.packets_received = state.packets_received + 1
+        },
+        Hata(_) => {
+            state.parse_errors = state.parse_errors + 1
+        }
+    }
+son
+
+// ============================================================================
+// Yardımcı Fonksiyonlar
+// ============================================================================
+
+fonksiyon gps_yayinla(output: &sync::RingBuffer<TargetData, 8>) yap
+    state.last_gps_update_ms = timer::millis()
+    
+    olsun target = TargetData {
+        lat: state.gps_lat,
+        lon: state.gps_lon,
+        alt: state.gps_alt,
+        speed: state.gps_speed,
+        course: state.gps_course,
+        fix_valid: state.gps_valid,
+        is_target: doğru,
+        timestamp_ms: timer::millis()
+    }
+    output.write(target)
+son
+
+// ============================================================================
+// Telemetri Gönderim
+// ============================================================================
+
+fonksiyon telemetri_gonder(status: &SystemStatus) yap
+    // Basit telemetri formatı
+    // PAN:xxx.x,TILT:xxx.x,DIST:xxxx.x,AZ:xxx.x,EL:xxx.x\n
+    
+    olsun msg = string::format(
+        "PAN:{:.1},TILT:{:.1},SERVOS:{}\n",
+        status.pan_angle,
+        status.tilt_angle,
+        eğer status.servos_enabled yap "ON" yoksa yap "OFF" son
+    )
+    
+    bt::write_string(&msg)
+    state.packets_sent = state.packets_sent + 1
+son
+
+// ============================================================================
+// Harici API
+// ============================================================================
+
+açık fonksiyon get_gps_fix() -> tamsayı yap
+    dön state.gps_fix
+son
+
+açık fonksiyon get_satellites() -> tamsayı yap
+    dön state.gps_satellites
+son
+
+açık fonksiyon is_gps_valid() -> mantıksal yap
+    // 5 saniye içinde güncelleme olmalı
+    olsun age_ms = timer::millis() - state.last_gps_update_ms
+    dön state.gps_valid ve age_ms < 5000
+son
+
+açık fonksiyon get_protocol_name() -> metin yap
+    eşle state.protocol {
+        Protocol::NMEA => dön "NMEA",
+        Protocol::MAVLink => dön "MAVLink",
+        Protocol::LTM => dön "LTM",
+        Protocol::Bilinmeyen => dön "Unknown"
+    }
+son
+
+açık fonksiyon get_stats() -> (tamsayı, tamsayı, tamsayı) yap
+    dön (state.packets_received, state.packets_sent, state.parse_errors)
+son
+
+açık fonksiyon reset_protocol() yap
+    state.protocol = Protocol::Bilinmeyen
+    yaz("[COMM] Protokol algılama sıfırlandı")
+son

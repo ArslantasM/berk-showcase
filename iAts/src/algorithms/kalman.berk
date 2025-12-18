@@ -1,0 +1,297 @@
+// ============================================================================
+// iAts BERK - Extended Kalman Filter
+// ============================================================================
+// Sensör füzyon için Extended Kalman Filter implementasyonu
+// ============================================================================
+
+modül kalman
+
+kullan std::math
+
+// ============================================================================
+// Kalman Filtre Durumu
+// ============================================================================
+
+açık yapı KalmanState yap
+    // Durum vektörü: [heading, pitch, roll]
+    açık heading: kesirli,
+    açık pitch: kesirli,
+    açık roll: kesirli,
+    
+    // Durum kovaryans matrisi (3x3 diagonal olarak saklanır)
+    P_heading: kesirli,
+    P_pitch: kesirli,
+    P_roll: kesirli,
+    
+    // Süreç gürültüsü (Q)
+    Q_heading: kesirli,
+    Q_pitch: kesirli,
+    Q_roll: kesirli,
+    
+    // Ölçüm gürültüsü (R)
+    R_accel_pitch: kesirli,
+    R_accel_roll: kesirli,
+    R_mag_heading: kesirli,
+    
+    // Bias tahminleri
+    gyro_bias: [kesirli; 3]
+son
+
+// ============================================================================
+// Yapıcılar
+// ============================================================================
+
+açık fonksiyon KalmanState::new() -> KalmanState yap
+    dön KalmanState {
+        heading: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        P_heading: 1.0,
+        P_pitch: 1.0,
+        P_roll: 1.0,
+        Q_heading: 0.001,
+        Q_pitch: 0.001,
+        Q_roll: 0.001,
+        R_accel_pitch: 0.03,
+        R_accel_roll: 0.03,
+        R_mag_heading: 0.1,
+        gyro_bias: [0.0, 0.0, 0.0]
+    }
+son
+
+açık fonksiyon KalmanState::new_with_config(cfg: &KalmanConfig) -> KalmanState yap
+    dön KalmanState {
+        heading: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        P_heading: 1.0,
+        P_pitch: 1.0,
+        P_roll: 1.0,
+        Q_heading: cfg.q_angle,
+        Q_pitch: cfg.q_angle,
+        Q_roll: cfg.q_angle,
+        R_accel_pitch: cfg.r_accel,
+        R_accel_roll: cfg.r_accel,
+        R_mag_heading: cfg.r_mag,
+        gyro_bias: [0.0, 0.0, 0.0]
+    }
+son
+
+// ============================================================================
+// Predict Adımı
+// ============================================================================
+
+açık fonksiyon KalmanState::predict(
+    &değişken öz,
+    gyro_x: kesirli,  // Roll rate (°/s)
+    gyro_y: kesirli,  // Pitch rate (°/s)
+    gyro_z: kesirli,  // Yaw rate (°/s)
+    dt: kesirli       // Delta time (saniye)
+) yap
+    // Bias kompanzasyonu
+    olsun gx = gyro_x - öz.gyro_bias[0]
+    olsun gy = gyro_y - öz.gyro_bias[1]
+    olsun gz = gyro_z - öz.gyro_bias[2]
+    
+    // Euler açılarını radyana çevir
+    olsun roll_rad = öz.roll * math::PI / 180.0
+    olsun pitch_rad = öz.pitch * math::PI / 180.0
+    
+    // Trigonometrik değerler
+    olsun sin_roll = math::sin(roll_rad)
+    olsun cos_roll = math::cos(roll_rad)
+    olsun tan_pitch = math::tan(pitch_rad)
+    olsun cos_pitch = math::cos(pitch_rad)
+    
+    // Euler kinematik denklemleri
+    // roll_dot = gx + gy * sin(roll) * tan(pitch) + gz * cos(roll) * tan(pitch)
+    // pitch_dot = gy * cos(roll) - gz * sin(roll)
+    // yaw_dot = (gy * sin(roll) + gz * cos(roll)) / cos(pitch)
+    
+    olsun roll_rate = gx + gy * sin_roll * tan_pitch + gz * cos_roll * tan_pitch
+    olsun pitch_rate = gy * cos_roll - gz * sin_roll
+    olsun yaw_rate = eğer math::abs(cos_pitch) > 0.01 yap
+        (gy * sin_roll + gz * cos_roll) / cos_pitch
+    yoksa yap
+        gz // Gimbal lock'a yakın, basitleştir
+    son
+    
+    // Durum tahminini güncelle
+    öz.roll = öz.roll + roll_rate * dt
+    öz.pitch = öz.pitch + pitch_rate * dt
+    öz.heading = öz.heading + yaw_rate * dt
+    
+    // Heading'i 0-360 aralığına normalize et
+    eğer öz.heading < 0.0 yap
+        öz.heading = öz.heading + 360.0
+    son
+    eğer öz.heading >= 360.0 yap
+        öz.heading = öz.heading - 360.0
+    son
+    
+    // Pitch'i ±90° aralığına sınırla
+    öz.pitch = clamp(öz.pitch, -89.0, 89.0)
+    
+    // Roll'u ±180° aralığına normalize et
+    eğer öz.roll > 180.0 yap
+        öz.roll = öz.roll - 360.0
+    son
+    eğer öz.roll < -180.0 yap
+        öz.roll = öz.roll + 360.0
+    son
+    
+    // Kovaryans güncelle (P = P + Q)
+    öz.P_heading = öz.P_heading + öz.Q_heading * dt
+    öz.P_pitch = öz.P_pitch + öz.Q_pitch * dt
+    öz.P_roll = öz.P_roll + öz.Q_roll * dt
+son
+
+// ============================================================================
+// Update Adımları
+// ============================================================================
+
+açık fonksiyon KalmanState::update_accel(
+    &değişken öz,
+    measured_pitch: kesirli,
+    measured_roll: kesirli
+) yap
+    // Pitch update
+    olsun y_pitch = measured_pitch - öz.pitch  // İnovasyon
+    olsun S_pitch = öz.P_pitch + öz.R_accel_pitch  // İnovasyon kovaryansı
+    olsun K_pitch = öz.P_pitch / S_pitch  // Kalman kazancı
+    
+    öz.pitch = öz.pitch + K_pitch * y_pitch
+    öz.P_pitch = (1.0 - K_pitch) * öz.P_pitch
+    
+    // Roll update
+    olsun y_roll = measured_roll - öz.roll
+    olsun S_roll = öz.P_roll + öz.R_accel_roll
+    olsun K_roll = öz.P_roll / S_roll
+    
+    öz.roll = öz.roll + K_roll * y_roll
+    öz.P_roll = (1.0 - K_roll) * öz.P_roll
+son
+
+açık fonksiyon KalmanState::update_heading(
+    &değişken öz,
+    measured_heading: kesirli
+) yap
+    // Heading farkını en kısa yoldan hesapla
+    değişken y_heading = measured_heading - öz.heading
+    
+    eğer y_heading > 180.0 yap
+        y_heading = y_heading - 360.0
+    son
+    eğer y_heading < -180.0 yap
+        y_heading = y_heading + 360.0
+    son
+    
+    olsun S_heading = öz.P_heading + öz.R_mag_heading
+    olsun K_heading = öz.P_heading / S_heading
+    
+    öz.heading = öz.heading + K_heading * y_heading
+    öz.P_heading = (1.0 - K_heading) * öz.P_heading
+    
+    // Normalize et
+    eğer öz.heading < 0.0 yap
+        öz.heading = öz.heading + 360.0
+    son
+    eğer öz.heading >= 360.0 yap
+        öz.heading = öz.heading - 360.0
+    son
+son
+
+// ============================================================================
+// Bias Güncelleme
+// ============================================================================
+
+açık fonksiyon KalmanState::update_gyro_bias(
+    &değişken öz,
+    measured_bias: [kesirli; 3],
+    alpha: kesirli  // Öğrenme oranı (0.001 tipik)
+) yap
+    // Exponential moving average ile bias güncelle
+    öz.gyro_bias[0] = öz.gyro_bias[0] * (1.0 - alpha) + measured_bias[0] * alpha
+    öz.gyro_bias[1] = öz.gyro_bias[1] * (1.0 - alpha) + measured_bias[1] * alpha
+    öz.gyro_bias[2] = öz.gyro_bias[2] * (1.0 - alpha) + measured_bias[2] * alpha
+son
+
+// ============================================================================
+// Reset ve Utility
+// ============================================================================
+
+açık fonksiyon KalmanState::reset(&değişken öz) yap
+    öz.heading = 0.0
+    öz.pitch = 0.0
+    öz.roll = 0.0
+    öz.P_heading = 1.0
+    öz.P_pitch = 1.0
+    öz.P_roll = 1.0
+    öz.gyro_bias = [0.0, 0.0, 0.0]
+son
+
+açık fonksiyon KalmanState::set_initial(
+    &değişken öz,
+    heading: kesirli,
+    pitch: kesirli,
+    roll: kesirli
+) yap
+    öz.heading = heading
+    öz.pitch = pitch
+    öz.roll = roll
+    // Düşük başlangıç kovaryansı - güveniyoruz
+    öz.P_heading = 0.1
+    öz.P_pitch = 0.1
+    öz.P_roll = 0.1
+son
+
+açık fonksiyon KalmanState::set_process_noise(
+    &değişken öz,
+    q_heading: kesirli,
+    q_pitch: kesirli,
+    q_roll: kesirli
+) yap
+    öz.Q_heading = q_heading
+    öz.Q_pitch = q_pitch
+    öz.Q_roll = q_roll
+son
+
+açık fonksiyon KalmanState::set_measurement_noise(
+    &değişken öz,
+    r_accel: kesirli,
+    r_mag: kesirli
+) yap
+    öz.R_accel_pitch = r_accel
+    öz.R_accel_roll = r_accel
+    öz.R_mag_heading = r_mag
+son
+
+// ============================================================================
+// Kovaryans Bilgisi (Belirsizlik Tahmini)
+// ============================================================================
+
+açık fonksiyon KalmanState::get_heading_uncertainty(&öz) -> kesirli yap
+    dön math::sqrt(öz.P_heading)
+son
+
+açık fonksiyon KalmanState::get_pitch_uncertainty(&öz) -> kesirli yap
+    dön math::sqrt(öz.P_pitch)
+son
+
+açık fonksiyon KalmanState::get_roll_uncertainty(&öz) -> kesirli yap
+    dön math::sqrt(öz.P_roll)
+son
+
+// ============================================================================
+// Yardımcı Fonksiyonlar
+// ============================================================================
+
+fonksiyon clamp(value: kesirli, min: kesirli, max: kesirli) -> kesirli yap
+    eğer value < min yap
+        dön min
+    son
+    eğer value > max yap
+        dön max
+    son
+    dön value
+son

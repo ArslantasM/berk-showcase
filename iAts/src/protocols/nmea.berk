@@ -1,0 +1,338 @@
+// ============================================================================
+// iAts BERK - NMEA GPS Protocol Parser
+// ============================================================================
+// NMEA 0183 protokol çözümleyici
+// ============================================================================
+
+modül nmea
+
+kullan std::string
+
+// ============================================================================
+// Veri Yapıları
+// ============================================================================
+
+açık yapı GGAData yap
+    açık time: metin,           // UTC zaman (hhmmss.ss)
+    açık latitude: kesirli,     // Derece cinsinden enlem
+    açık longitude: kesirli,    // Derece cinsinden boylam
+    açık fix_quality: tamsayı,  // 0=geçersiz, 1=GPS, 2=DGPS, 4=RTK Fixed, 5=RTK Float
+    açık satellites: tamsayı,   // Görünen uydu sayısı
+    açık hdop: kesirli,         // Yatay dilution of precision
+    açık altitude: kesirli,     // Deniz seviyesinden yükseklik (metre)
+    açık geoid_sep: kesirli     // Geoid ayrımı (metre)
+son
+
+açık yapı RMCData yap
+    açık time: metin,           // UTC zaman
+    açık status: karakter,      // A=geçerli, V=geçersiz
+    açık latitude: kesirli,
+    açık longitude: kesirli,
+    açık speed_knots: kesirli,  // Hız (knot)
+    açık course: kesirli,       // Rota (derece)
+    açık date: metin,           // Tarih (ddmmyy)
+    açık mag_var: kesirli       // Manyetik sapma
+son
+
+açık yapı VTGData yap
+    açık true_course: kesirli,   // Gerçek rota (derece)
+    açık mag_course: kesirli,    // Manyetik rota (derece)
+    açık speed_knots: kesirli,   // Hız (knot)
+    açık speed_kmh: kesirli      // Hız (km/s)
+son
+
+açık yapı GSAData yap
+    açık mode: karakter,         // M=manuel, A=otomatik
+    açık fix_type: tamsayı,      // 1=yok, 2=2D, 3=3D
+    açık pdop: kesirli,
+    açık hdop: kesirli,
+    açık vdop: kesirli,
+    açık satellites: [tamsayı; 12]  // Kullanılan uydu PRN'leri
+son
+
+// ============================================================================
+// Checksum Doğrulama
+// ============================================================================
+
+açık fonksiyon verify_checksum(sentence: &metin) -> mantıksal yap
+    // "$" ile başlamalı
+    eğer değil sentence.starts_with("$") yap
+        dön yanlış
+    son
+    
+    // "*" bulun
+    olsun star_pos = sentence.find("*")
+    eğer star_pos.is_none() yap
+        dön yanlış
+    son
+    olsun star_index = star_pos.unwrap()
+    
+    // Checksum'ı oku
+    eğer sentence.len() < star_index + 3 yap
+        dön yanlış
+    son
+    olsun checksum_str = sentence.substring(star_index + 1, star_index + 3)
+    olsun expected = eşle tamsayı::parse_hex(checksum_str) {
+        Tamam(v) => v,
+        Hata(_) => dön yanlış
+    }
+    
+    // XOR hesapla ($ ve * arasındaki karakterler)
+    değişken calculated: bayt = 0
+    için c içinde sentence.chars().skip(1) yap  // $ atla
+        eğer c == '*' yap
+            kır
+        son
+        calculated = calculated ^ (c olarak bayt)
+    son
+    
+    dön (calculated olarak tamsayı) == expected
+son
+
+// ============================================================================
+// GGA Parser
+// ============================================================================
+
+açık fonksiyon parse_gga(sentence: &metin) -> Sonuç<GGAData, Hata> yap
+    olsun fields = split_fields(sentence)
+    
+    eğer fields.len() < 15 yap
+        dön Hata("GGA: yetersiz alan")
+    son
+    
+    // Cümle tipini kontrol et
+    eğer değil (fields[0].ends_with("GGA")) yap
+        dön Hata("GGA cümlesi değil")
+    son
+    
+    // Enlem parse et
+    olsun lat = parse_latitude(&fields[2], &fields[3])?
+    
+    // Boylam parse et
+    olsun lon = parse_longitude(&fields[4], &fields[5])?
+    
+    olsun gga = GGAData {
+        time: fields[1].clone(),
+        latitude: lat,
+        longitude: lon,
+        fix_quality: parse_int_or_zero(&fields[6]),
+        satellites: parse_int_or_zero(&fields[7]),
+        hdop: parse_float_or_zero(&fields[8]),
+        altitude: parse_float_or_zero(&fields[9]),
+        geoid_sep: parse_float_or_zero(&fields[11])
+    }
+    
+    dön Tamam(gga)
+son
+
+// ============================================================================
+// RMC Parser
+// ============================================================================
+
+açık fonksiyon parse_rmc(sentence: &metin) -> Sonuç<RMCData, Hata> yap
+    olsun fields = split_fields(sentence)
+    
+    eğer fields.len() < 12 yap
+        dön Hata("RMC: yetersiz alan")
+    son
+    
+    // Cümle tipini kontrol et
+    eğer değil (fields[0].ends_with("RMC")) yap
+        dön Hata("RMC cümlesi değil")
+    son
+    
+    // Status kontrol
+    olsun status = eğer fields[2].len() > 0 yap
+        fields[2].chars().next().unwrap_or('V')
+    yoksa yap
+        'V'
+    son
+    
+    // Enlem parse et
+    olsun lat = parse_latitude(&fields[3], &fields[4])?
+    
+    // Boylam parse et
+    olsun lon = parse_longitude(&fields[5], &fields[6])?
+    
+    olsun rmc = RMCData {
+        time: fields[1].clone(),
+        status: status,
+        latitude: lat,
+        longitude: lon,
+        speed_knots: parse_float_or_zero(&fields[7]),
+        course: parse_float_or_zero(&fields[8]),
+        date: fields[9].clone(),
+        mag_var: parse_float_or_zero(&fields[10])
+    }
+    
+    dön Tamam(rmc)
+son
+
+// ============================================================================
+// VTG Parser
+// ============================================================================
+
+açık fonksiyon parse_vtg(sentence: &metin) -> Sonuç<VTGData, Hata> yap
+    olsun fields = split_fields(sentence)
+    
+    eğer fields.len() < 9 yap
+        dön Hata("VTG: yetersiz alan")
+    son
+    
+    olsun vtg = VTGData {
+        true_course: parse_float_or_zero(&fields[1]),
+        mag_course: parse_float_or_zero(&fields[3]),
+        speed_knots: parse_float_or_zero(&fields[5]),
+        speed_kmh: parse_float_or_zero(&fields[7])
+    }
+    
+    dön Tamam(vtg)
+son
+
+// ============================================================================
+// GSA Parser
+// ============================================================================
+
+açık fonksiyon parse_gsa(sentence: &metin) -> Sonuç<GSAData, Hata> yap
+    olsun fields = split_fields(sentence)
+    
+    eğer fields.len() < 18 yap
+        dön Hata("GSA: yetersiz alan")
+    son
+    
+    olsun mode = eğer fields[1].len() > 0 yap
+        fields[1].chars().next().unwrap_or('A')
+    yoksa yap
+        'A'
+    son
+    
+    değişken satellites: [tamsayı; 12] = [0; 12]
+    için i içinde 0..12 yap
+        satellites[i] = parse_int_or_zero(&fields[3 + i])
+    son
+    
+    olsun gsa = GSAData {
+        mode: mode,
+        fix_type: parse_int_or_zero(&fields[2]),
+        pdop: parse_float_or_zero(&fields[15]),
+        hdop: parse_float_or_zero(&fields[16]),
+        vdop: parse_float_or_zero(&fields[17]),
+        satellites: satellites
+    }
+    
+    dön Tamam(gsa)
+son
+
+// ============================================================================
+// Yardımcı Fonksiyonlar
+// ============================================================================
+
+fonksiyon split_fields(sentence: &metin) -> [metin] yap
+    // '*' veya '\n' öncesini al
+    değişken clean = sentence.clone()
+    eğer olsun Bazı(pos) = clean.find("*") yap
+        clean = clean.substring(0, pos)
+    son
+    
+    // ',' ile ayır
+    dön clean.split(',')
+son
+
+fonksiyon parse_latitude(value: &metin, hemisphere: &metin) -> Sonuç<kesirli, Hata> yap
+    eğer value.len() < 4 yap
+        dön Tamam(0.0)
+    son
+    
+    // Format: DDMM.MMMM
+    olsun degrees = eşle kesirli::parse(value.substring(0, 2)) {
+        Tamam(v) => v,
+        Hata(_) => dön Hata("Enlem derece parse hatası")
+    }
+    
+    olsun minutes = eşle kesirli::parse(value.substring(2, value.len())) {
+        Tamam(v) => v,
+        Hata(_) => dön Hata("Enlem dakika parse hatası")
+    }
+    
+    değişken lat = degrees + minutes / 60.0
+    
+    eğer hemisphere == "S" yap
+        lat = -lat
+    son
+    
+    dön Tamam(lat)
+son
+
+fonksiyon parse_longitude(value: &metin, hemisphere: &metin) -> Sonuç<kesirli, Hata> yap
+    eğer value.len() < 5 yap
+        dön Tamam(0.0)
+    son
+    
+    // Format: DDDMM.MMMM
+    olsun degrees = eşle kesirli::parse(value.substring(0, 3)) {
+        Tamam(v) => v,
+        Hata(_) => dön Hata("Boylam derece parse hatası")
+    }
+    
+    olsun minutes = eşle kesirli::parse(value.substring(3, value.len())) {
+        Tamam(v) => v,
+        Hata(_) => dön Hata("Boylam dakika parse hatası")
+    }
+    
+    değişken lon = degrees + minutes / 60.0
+    
+    eğer hemisphere == "W" yap
+        lon = -lon
+    son
+    
+    dön Tamam(lon)
+son
+
+fonksiyon parse_float_or_zero(s: &metin) -> kesirli yap
+    eğer s.len() == 0 yap
+        dön 0.0
+    son
+    
+    eşle kesirli::parse(s) {
+        Tamam(v) => dön v,
+        Hata(_) => dön 0.0
+    }
+son
+
+fonksiyon parse_int_or_zero(s: &metin) -> tamsayı yap
+    eğer s.len() == 0 yap
+        dön 0
+    son
+    
+    eşle tamsayı::parse(s) {
+        Tamam(v) => dön v,
+        Hata(_) => dön 0
+    }
+son
+
+// ============================================================================
+// Cümle Oluşturma
+// ============================================================================
+
+açık fonksiyon create_sentence(sentence_type: &metin, fields: &[metin]) -> metin yap
+    değişken sentence = metin::new()
+    sentence.push('$')
+    sentence.push_str(sentence_type)
+    
+    için field içinde fields yap
+        sentence.push(',')
+        sentence.push_str(field)
+    son
+    
+    // Checksum hesapla
+    değişken checksum: bayt = 0
+    için c içinde sentence.chars().skip(1) yap  // $ atla
+        checksum = checksum ^ (c olarak bayt)
+    son
+    
+    sentence.push('*')
+    sentence.push_str(&format!("{:02X}", checksum))
+    sentence.push_str("\r\n")
+    
+    dön sentence
+son

@@ -1,0 +1,293 @@
+// ============================================================================
+// iAts BERK - LTM (Light Telemetry) Protocol Parser
+// ============================================================================
+// LTM protokol çözümleyici
+// ============================================================================
+
+modül ltm
+
+// ============================================================================
+// LTM Sabitler
+// ============================================================================
+
+sabit LTM_HEADER1: bayt = 0x24  // '$'
+sabit LTM_HEADER2: bayt = 0x54  // 'T'
+
+// Frame Tipleri
+açık sabit FRAME_G: karakter = 'G'  // GPS
+açık sabit FRAME_A: karakter = 'A'  // Attitude
+açık sabit FRAME_S: karakter = 'S'  // Status
+açık sabit FRAME_O: karakter = 'O'  // Origin (Home)
+açık sabit FRAME_N: karakter = 'N'  // Navigation
+açık sabit FRAME_X: karakter = 'X'  // Extra / Extended
+
+// ============================================================================
+// Frame Yapıları
+// ============================================================================
+
+açık yapı LtmFrame yap
+    açık frame_type: karakter,
+    açık payload: [bayt; 32],
+    açık length: tamsayı,
+    açık checksum: bayt
+son
+
+// G-Frame: GPS (14 bytes)
+açık yapı GFrame yap
+    açık lat: i32,           // degE7
+    açık lon: i32,           // degE7
+    açık speed: bayt,        // m/s
+    açık alt: i32,           // cm (32-bit packed as 24-bit + flags)
+    açık sats: bayt,         // Satelit sayısı (lower 6 bits)
+    açık fix_type: bayt      // Fix type (upper 2 bits of sats byte)
+son
+
+// A-Frame: Attitude (6 bytes)
+açık yapı AFrame yap
+    açık pitch: i16,         // deg * 10
+    açık roll: i16,          // deg * 10
+    açık heading: i16        // deg
+son
+
+// S-Frame: Status (7 bytes)
+açık yapı SFrame yap
+    açık vbat: u16,          // mV
+    açık current: u16,       // mA
+    açık rssi: bayt,         // %
+    açık airspeed: bayt,     // m/s
+    açık status: bayt        // Arm flag ve flight mode
+son
+
+// O-Frame: Origin/Home (14 bytes)
+açık yapı OFrame yap
+    açık lat: i32,           // degE7
+    açık lon: i32,           // degE7
+    açık alt: i32,           // cm
+    açık osd_on: bayt,       // OSD home fix flag
+    açık home_fix: bayt
+son
+
+// N-Frame: Navigation (6 bytes)
+açık yapı NFrame yap
+    açık gps_mode: bayt,     // Navigation mode
+    açık nav_mode: bayt,     // Navigation state
+    açık nav_action: bayt,   // Navigation action
+    açık wp_number: bayt,    // Waypoint number
+    açık nav_error: bayt,    // Navigation error
+    açık flags: bayt         // Additional flags
+son
+
+// ============================================================================
+// Parser
+// ============================================================================
+
+açık fonksiyon parse(data: &[bayt]) -> Sonuç<LtmFrame, Hata> yap
+    eğer data.len() < 4 yap
+        dön Hata("Veri çok kısa")
+    son
+    
+    // Header kontrol
+    eğer data[0] != LTM_HEADER1 veya data[1] != LTM_HEADER2 yap
+        dön Hata("Geçersiz LTM header")
+    son
+    
+    olsun frame_type = data[2] olarak karakter
+    olsun payload_len = get_payload_length(frame_type)
+    
+    eğer payload_len == 0 yap
+        dön Hata("Bilinmeyen frame tipi")
+    son
+    
+    olsun total_len = 3 + payload_len + 1  // Header(3) + Payload + Checksum
+    
+    eğer data.len() < total_len yap
+        dön Hata("Frame eksik")
+    son
+    
+    // Checksum doğrula
+    olsun expected_crc = calculate_checksum(&data[3..3+payload_len])
+    olsun received_crc = data[3 + payload_len]
+    
+    eğer expected_crc != received_crc yap
+        dön Hata("Checksum hatası")
+    son
+    
+    değişken frame = LtmFrame {
+        frame_type: frame_type,
+        payload: [0; 32],
+        length: payload_len,
+        checksum: received_crc
+    }
+    
+    // Payload kopyala
+    için i içinde 0..payload_len yap
+        frame.payload[i] = data[3 + i]
+    son
+    
+    dön Tamam(frame)
+son
+
+fonksiyon get_payload_length(frame_type: karakter) -> tamsayı yap
+    eşle frame_type {
+        'G' => dön 14,  // GPS
+        'A' => dön 6,   // Attitude
+        'S' => dön 7,   // Status
+        'O' => dön 14,  // Origin
+        'N' => dön 6,   // Navigation
+        'X' => dön 6,   // Extra
+        _ => dön 0
+    }
+son
+
+fonksiyon calculate_checksum(data: &[bayt]) -> bayt yap
+    değişken crc: bayt = 0
+    için byte içinde data yap
+        crc = crc ^ *byte
+    son
+    dön crc
+son
+
+// ============================================================================
+// Frame Decode
+// ============================================================================
+
+açık fonksiyon decode_g_frame(frame: &LtmFrame) -> GFrame yap
+    olsun p = &frame.payload
+    
+    olsun lat = read_i32(p, 0)
+    olsun lon = read_i32(p, 4)
+    olsun speed = p[8]
+    
+    // Altitude: 24-bit signed + 8-bit flags
+    olsun alt_raw = (p[9] olarak i32) |
+                    ((p[10] olarak i32) << 8) |
+                    ((p[11] olarak i32) << 16)
+    
+    // Sign extend 24-bit to 32-bit
+    olsun alt = eğer (alt_raw & 0x800000) != 0 yap
+        alt_raw | 0xFF000000 olarak i32
+    yoksa yap
+        alt_raw
+    son
+    
+    olsun sats_byte = p[12]
+    olsun sats = sats_byte & 0x3F       // Lower 6 bits
+    olsun fix_type = (sats_byte >> 6)   // Upper 2 bits
+    
+    dön GFrame {
+        lat: lat,
+        lon: lon,
+        speed: speed,
+        alt: alt,
+        sats: sats,
+        fix_type: fix_type
+    }
+son
+
+açık fonksiyon decode_a_frame(frame: &LtmFrame) -> AFrame yap
+    olsun p = &frame.payload
+    
+    dön AFrame {
+        pitch: read_i16(p, 0),
+        roll: read_i16(p, 2),
+        heading: read_i16(p, 4)
+    }
+son
+
+açık fonksiyon decode_s_frame(frame: &LtmFrame) -> SFrame yap
+    olsun p = &frame.payload
+    
+    dön SFrame {
+        vbat: read_u16(p, 0),
+        current: read_u16(p, 2),
+        rssi: p[4],
+        airspeed: p[5],
+        status: p[6]
+    }
+son
+
+açık fonksiyon decode_o_frame(frame: &LtmFrame) -> OFrame yap
+    olsun p = &frame.payload
+    
+    dön OFrame {
+        lat: read_i32(p, 0),
+        lon: read_i32(p, 4),
+        alt: read_i32(p, 8),
+        osd_on: p[12],
+        home_fix: p[13]
+    }
+son
+
+açık fonksiyon decode_n_frame(frame: &LtmFrame) -> NFrame yap
+    olsun p = &frame.payload
+    
+    dön NFrame {
+        gps_mode: p[0],
+        nav_mode: p[1],
+        nav_action: p[2],
+        wp_number: p[3],
+        nav_error: p[4],
+        flags: p[5]
+    }
+son
+
+// ============================================================================
+// Yardımcı Fonksiyonlar
+// ============================================================================
+
+fonksiyon read_i16(data: &[bayt], offset: tamsayı) -> i16 yap
+    dön ((data[offset] olarak i16) |
+            ((data[offset + 1] olarak i16) << 8))
+son
+
+fonksiyon read_u16(data: &[bayt], offset: tamsayı) -> u16 yap
+    dön (data[offset] olarak u16) |
+           ((data[offset + 1] olarak u16) << 8)
+son
+
+fonksiyon read_i32(data: &[bayt], offset: tamsayı) -> i32 yap
+    dön (data[offset] olarak i32) |
+           ((data[offset + 1] olarak i32) << 8) |
+           ((data[offset + 2] olarak i32) << 16) |
+           ((data[offset + 3] olarak i32) << 24)
+son
+
+// ============================================================================
+// Dönüşüm Yardımcıları
+// ============================================================================
+
+/// degE7'den derece'ye
+açık fonksiyon dege7_to_deg(dege7: i32) -> kesirli yap
+    dön (dege7 olarak kesirli) / 10000000.0
+son
+
+/// cm'den metre'ye
+açık fonksiyon cm_to_m(cm: i32) -> kesirli yap
+    dön (cm olarak kesirli) / 100.0
+son
+
+/// pitch/roll (deg*10) -> derece
+açık fonksiyon attitude_to_deg(value: i16) -> kesirli yap
+    dön (value olarak kesirli) / 10.0
+son
+
+/// Status byte'ından arm durumu
+açık fonksiyon is_armed(status: bayt) -> mantıksal yap
+    dön (status & 0x01) != 0
+son
+
+/// Status byte'ından flight mode
+açık fonksiyon get_flight_mode(status: bayt) -> tamsayı yap
+    dön ((status >> 2) & 0x3F) olarak tamsayı
+son
+
+/// Fix type string
+açık fonksiyon fix_type_str(fix_type: bayt) -> metin yap
+    eşle fix_type {
+        0 => dön "No GPS",
+        1 => dön "No Fix",
+        2 => dön "2D Fix",
+        3 => dön "3D Fix",
+        _ => dön "Unknown"
+    }
+son

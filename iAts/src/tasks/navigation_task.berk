@@ -1,0 +1,381 @@
+// ============================================================================
+// iAts BERK - Navigasyon Hesaplama Görevi
+// ============================================================================
+// Hedef açı (azimut + elevation) hesaplama
+// GPS koordinatları → Servo açıları
+// ============================================================================
+
+modül navigation_task
+
+kullan config
+kullan algorithms::navigation
+kullan algorithms::pid
+kullan hal::timer
+kullan std::sync
+kullan std::math
+
+// ============================================================================
+// Navigasyon Durumu
+// ============================================================================
+
+yapı NavState yap
+    // Tracker konumu (sabit)
+    home_lat: kesirli,
+    home_lon: kesirli,
+    home_alt: kesirli,
+    
+    // Hedef konumu
+    target_lat: kesirli,
+    target_lon: kesirli,
+    target_alt: kesirli,
+    
+    // Tracker yönelimi (sensörlerden)
+    current_heading: kesirli,
+    current_pitch: kesirli,
+    current_roll: kesirli,
+    
+    // Hesaplanan hedef açıları
+    target_azimuth: kesirli,    // Yatay açı (0-360°)
+    target_elevation: kesirli,  // Dikey açı (-90° ile +90°)
+    target_distance: kesirli,   // Metre cinsinden mesafe
+    
+    // PID kontrolcüler
+    azimuth_pid: pid::PIDController,
+    elevation_pid: pid::PIDController,
+    
+    // Servo komutları
+    pan_angle: kesirli,
+    tilt_angle: kesirli,
+    
+    // Durum bayrakları
+    home_set: mantıksal,
+    target_valid: mantıksal,
+    tracking_active: mantıksal,
+    
+    // Zaman takibi
+    last_update_ms: tamsayı
+son
+
+statik değişken state: NavState = NavState {
+    home_lat: 0.0,
+    home_lon: 0.0,
+    home_alt: 0.0,
+    target_lat: 0.0,
+    target_lon: 0.0,
+    target_alt: 0.0,
+    current_heading: 0.0,
+    current_pitch: 0.0,
+    current_roll: 0.0,
+    target_azimuth: 0.0,
+    target_elevation: 0.0,
+    target_distance: 0.0,
+    azimuth_pid: pid::PIDController::new(),
+    elevation_pid: pid::PIDController::new(),
+    pan_angle: 0.0,
+    tilt_angle: 0.0,
+    home_set: yanlış,
+    target_valid: yanlış,
+    tracking_active: yanlış,
+    last_update_ms: 0
+}
+
+// ============================================================================
+// Sabitler
+// ============================================================================
+
+sabit EARTH_RADIUS_M: kesirli = 6371000.0    // Dünya yarıçapı (metre)
+sabit DEG_TO_RAD: kesirli = 0.017453292519943295  // π / 180
+sabit RAD_TO_DEG: kesirli = 57.29577951308232     // 180 / π
+
+// ============================================================================
+// Başlatma
+// ============================================================================
+
+açık fonksiyon init() -> Sonuç<(), Hata> yap
+    yaz("[NAV] Navigasyon modülü başlatılıyor...")
+    
+    // Azimuth PID yapılandır
+    state.azimuth_pid = pid::PIDController::new_with_config(
+        config::PID.pan_kp,
+        config::PID.pan_ki,
+        config::PID.pan_kd,
+        -config::SERVO.pan.max_speed,
+        config::SERVO.pan.max_speed
+    )
+    
+    // Elevation PID yapılandır
+    state.elevation_pid = pid::PIDController::new_with_config(
+        config::PID.tilt_kp,
+        config::PID.tilt_ki,
+        config::PID.tilt_kd,
+        -config::SERVO.tilt.max_speed,
+        config::SERVO.tilt.max_speed
+    )
+    
+    yaz("[NAV] Navigasyon modülü hazır")
+    dön Tamam(())
+son
+
+// ============================================================================
+// Ana Görev Döngüsü
+// ============================================================================
+
+açık fonksiyon run(
+    sensor_input: &sync::RingBuffer<SensorData, 16>,
+    target_input: &sync::RingBuffer<TargetData, 8>,
+    servo_output: &sync::RingBuffer<ServoCommand, 8>,
+    period_ms: tamsayı
+) yap
+    yaz("[NAV] Navigasyon görevi başladı")
+    
+    döngü yap
+        olsun start_ms = timer::millis()
+        
+        // Sensör verilerini oku
+        eğer olsun Bazı(sensor) = sensor_input.read() yap
+            state.current_heading = sensor.heading
+            state.current_pitch = sensor.pitch
+            state.current_roll = sensor.roll
+        son
+        
+        // Hedef verilerini oku
+        eğer olsun Bazı(target) = target_input.read() yap
+            target_guncelle(target)
+        son
+        
+        // Navigasyon hesapla
+        eğer state.home_set ve state.target_valid yap
+            navigasyon_hesapla()
+            
+            // PID ile servo açıları hesapla
+            servo_acilari_hesapla()
+            
+            // Servo komutlarını gönder
+            olsun cmd = ServoCommand {
+                pan_angle: state.pan_angle,
+                tilt_angle: state.tilt_angle,
+                pan_speed: math::abs(state.azimuth_pid.output),
+                tilt_speed: math::abs(state.elevation_pid.output),
+                timestamp_ms: timer::millis()
+            }
+            servo_output.write(cmd)
+        son
+        
+        // Periyodik bekleme
+        olsun elapsed = timer::millis() - start_ms
+        eğer elapsed < period_ms yap
+            timer::delay_ms(period_ms - elapsed)
+        son
+    son
+son
+
+// ============================================================================
+// Hedef Güncelleme
+// ============================================================================
+
+fonksiyon target_guncelle(target: TargetData) yap
+    // İlk GPS okuması home olarak ayarla
+    eğer değil state.home_set ve target.fix_valid yap
+        state.home_lat = target.lat
+        state.home_lon = target.lon
+        state.home_alt = target.alt
+        state.home_set = doğru
+        yaz("[NAV] Home konumu ayarlandı: {}, {}", target.lat, target.lon)
+    son
+    
+    // Hedef konumunu güncelle
+    eğer target.is_target yap
+        state.target_lat = target.lat
+        state.target_lon = target.lon
+        state.target_alt = target.alt
+        state.target_valid = doğru
+        state.last_update_ms = timer::millis()
+    son
+son
+
+// ============================================================================
+// Navigasyon Hesaplama
+// ============================================================================
+
+fonksiyon navigasyon_hesapla() yap
+    // Haversine formülü ile mesafe hesapla
+    state.target_distance = haversine_distance(
+        state.home_lat, state.home_lon,
+        state.target_lat, state.target_lon
+    )
+    
+    // Bearing (azimuth) hesapla
+    state.target_azimuth = bearing_calculate(
+        state.home_lat, state.home_lon,
+        state.target_lat, state.target_lon
+    )
+    
+    // Elevation hesapla
+    state.target_elevation = elevation_calculate(
+        state.target_distance,
+        state.target_alt - state.home_alt
+    )
+    
+    // Limitleri uygula
+    eğer state.target_elevation > config::NAV.max_elevation yap
+        state.target_elevation = config::NAV.max_elevation
+    son
+    eğer state.target_elevation < config::NAV.min_elevation yap
+        state.target_elevation = config::NAV.min_elevation
+    son
+son
+
+// ============================================================================
+// Haversine Formülü - Mesafe Hesaplama
+// ============================================================================
+
+fonksiyon haversine_distance(lat1: kesirli, lon1: kesirli, 
+                             lat2: kesirli, lon2: kesirli) -> kesirli yap
+    // Radyana çevir
+    olsun lat1_rad = lat1 * DEG_TO_RAD
+    olsun lat2_rad = lat2 * DEG_TO_RAD
+    olsun delta_lat = (lat2 - lat1) * DEG_TO_RAD
+    olsun delta_lon = (lon2 - lon1) * DEG_TO_RAD
+    
+    // Haversine formülü
+    olsun a = math::sin(delta_lat / 2.0) * math::sin(delta_lat / 2.0) +
+              math::cos(lat1_rad) * math::cos(lat2_rad) *
+              math::sin(delta_lon / 2.0) * math::sin(delta_lon / 2.0)
+    
+    olsun c = 2.0 * math::atan2(math::sqrt(a), math::sqrt(1.0 - a))
+    
+    dön EARTH_RADIUS_M * c
+son
+
+// ============================================================================
+// Bearing (Azimuth) Hesaplama
+// ============================================================================
+
+fonksiyon bearing_calculate(lat1: kesirli, lon1: kesirli,
+                           lat2: kesirli, lon2: kesirli) -> kesirli yap
+    olsun lat1_rad = lat1 * DEG_TO_RAD
+    olsun lat2_rad = lat2 * DEG_TO_RAD
+    olsun delta_lon = (lon2 - lon1) * DEG_TO_RAD
+    
+    olsun x = math::sin(delta_lon) * math::cos(lat2_rad)
+    olsun y = math::cos(lat1_rad) * math::sin(lat2_rad) -
+              math::sin(lat1_rad) * math::cos(lat2_rad) * math::cos(delta_lon)
+    
+    değişken bearing = math::atan2(x, y) * RAD_TO_DEG
+    
+    // 0-360 aralığına normalize et
+    eğer bearing < 0.0 yap
+        bearing = bearing + 360.0
+    son
+    
+    dön bearing
+son
+
+// ============================================================================
+// Elevation (Dikey Açı) Hesaplama
+// ============================================================================
+
+fonksiyon elevation_calculate(distance: kesirli, alt_diff: kesirli) -> kesirli yap
+    eğer distance < 1.0 yap
+        dön 0.0  // Çok yakın, elevation anlamsız
+    son
+    
+    // Dünya eğriliği düzeltmesi
+    olsun earth_curve = (distance * distance) / (2.0 * EARTH_RADIUS_M)
+    olsun corrected_alt = alt_diff - earth_curve
+    
+    // Elevation açısı
+    olsun elevation = math::atan2(corrected_alt, distance) * RAD_TO_DEG
+    
+    dön elevation
+son
+
+// ============================================================================
+// Servo Açıları Hesaplama (PID)
+// ============================================================================
+
+fonksiyon servo_acilari_hesapla() yap
+    // Azimuth hatası (heading'e göre göreli)
+    değişken azimuth_error = state.target_azimuth - state.current_heading
+    
+    // En kısa yolu bul (-180 ile +180 arasına normalize)
+    eğer azimuth_error > 180.0 yap
+        azimuth_error = azimuth_error - 360.0
+    son
+    eğer azimuth_error < -180.0 yap
+        azimuth_error = azimuth_error + 360.0
+    son
+    
+    // Elevation hatası (pitch'e göre göreli)
+    olsun elevation_error = state.target_elevation - state.current_pitch
+    
+    // PID hesapla
+    state.azimuth_pid.update(azimuth_error)
+    state.elevation_pid.update(elevation_error)
+    
+    // Pan açısı hesapla
+    state.pan_angle = state.pan_angle + state.azimuth_pid.output
+    
+    // Tilt açısı hesapla
+    state.tilt_angle = state.tilt_angle + state.elevation_pid.output
+    
+    // Servo limitlerini uygula
+    state.pan_angle = clamp(
+        state.pan_angle,
+        config::SERVO.pan.min_angle,
+        config::SERVO.pan.max_angle
+    )
+    
+    state.tilt_angle = clamp(
+        state.tilt_angle,
+        config::SERVO.tilt.min_angle,
+        config::SERVO.tilt.max_angle
+    )
+son
+
+fonksiyon clamp(value: kesirli, min: kesirli, max: kesirli) -> kesirli yap
+    eğer value < min yap
+        dön min
+    son
+    eğer value > max yap
+        dön max
+    son
+    dön value
+son
+
+// ============================================================================
+// Harici API
+// ============================================================================
+
+açık fonksiyon set_home(lat: kesirli, lon: kesirli, alt: kesirli) yap
+    state.home_lat = lat
+    state.home_lon = lon
+    state.home_alt = alt
+    state.home_set = doğru
+    yaz("[NAV] Home manuel ayarlandı: {}, {}, {}m", lat, lon, alt)
+son
+
+açık fonksiyon set_tracking(active: mantıksal) yap
+    state.tracking_active = active
+    eğer değil active yap
+        // PID'leri sıfırla
+        state.azimuth_pid.reset()
+        state.elevation_pid.reset()
+    son
+son
+
+açık fonksiyon get_target_distance() -> kesirli yap
+    dön state.target_distance
+son
+
+açık fonksiyon get_target_azimuth() -> kesirli yap
+    dön state.target_azimuth
+son
+
+açık fonksiyon get_target_elevation() -> kesirli yap
+    dön state.target_elevation
+son
+
+açık fonksiyon is_home_set() -> mantıksal yap
+    dön state.home_set
+son

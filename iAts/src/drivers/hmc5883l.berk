@@ -1,0 +1,404 @@
+// ============================================================================
+// iAts BERK - HMC5883L / QMC5883 Magnetometer Driver
+// ============================================================================
+// 3-axis magnetometer I2C driver with auto-detect
+// ============================================================================
+
+modül hmc5883l
+
+kullan hal::i2c
+kullan hal::timer
+
+// ============================================================================
+// Chip Türleri
+// ============================================================================
+
+özel ChipType = enum {
+    HMC5883L,
+    QMC5883,
+    Unknown
+}
+
+// ============================================================================
+// HMC5883L Register Adresleri
+// ============================================================================
+
+sabit HMC_ADDR: bayt = 0x1E
+
+sabit HMC_REG_CONFIG_A: bayt = 0x00
+sabit HMC_REG_CONFIG_B: bayt = 0x01
+sabit HMC_REG_MODE: bayt = 0x02
+sabit HMC_REG_DATA_X_H: bayt = 0x03
+sabit HMC_REG_STATUS: bayt = 0x09
+sabit HMC_REG_ID_A: bayt = 0x0A
+
+// HMC5883L Gain değerleri
+sabit HMC_GAIN_0_88: bayt = 0x00  // ±0.88 Ga
+sabit HMC_GAIN_1_3: bayt = 0x20   // ±1.3 Ga (varsayılan)
+sabit HMC_GAIN_1_9: bayt = 0x40   // ±1.9 Ga
+sabit HMC_GAIN_2_5: bayt = 0x60   // ±2.5 Ga
+sabit HMC_GAIN_4_0: bayt = 0x80   // ±4.0 Ga
+sabit HMC_GAIN_4_7: bayt = 0xA0   // ±4.7 Ga
+sabit HMC_GAIN_5_6: bayt = 0xC0   // ±5.6 Ga
+sabit HMC_GAIN_8_1: bayt = 0xE0   // ±8.1 Ga
+
+// ============================================================================
+// QMC5883 Register Adresleri
+// ============================================================================
+
+sabit QMC_ADDR: bayt = 0x0D
+
+sabit QMC_REG_DATA_X_L: bayt = 0x00
+sabit QMC_REG_STATUS: bayt = 0x06
+sabit QMC_REG_CONTROL1: bayt = 0x09
+sabit QMC_REG_CONTROL2: bayt = 0x0A
+sabit QMC_REG_PERIOD: bayt = 0x0B
+sabit QMC_REG_CHIP_ID: bayt = 0x0D
+
+// ============================================================================
+// Ölçeklendirme Faktörleri
+// ============================================================================
+
+// HMC5883L gain → LSB/Gauss
+sabit HMC_SCALE_0_88: kesirli = 1370.0
+sabit HMC_SCALE_1_3: kesirli = 1090.0
+sabit HMC_SCALE_1_9: kesirli = 820.0
+sabit HMC_SCALE_2_5: kesirli = 660.0
+sabit HMC_SCALE_4_0: kesirli = 440.0
+sabit HMC_SCALE_4_7: kesirli = 390.0
+sabit HMC_SCALE_5_6: kesirli = 330.0
+sabit HMC_SCALE_8_1: kesirli = 230.0
+
+// QMC5883 hassasiyeti
+sabit QMC_SCALE_2G: kesirli = 12000.0
+sabit QMC_SCALE_8G: kesirli = 3000.0
+
+// ============================================================================
+// Durum
+// ============================================================================
+
+yapı MagState yap
+    chip_type: ChipType,
+    adres: bayt,
+    scale: kesirli,
+    initialized: mantıksal
+son
+
+statik değişken state: MagState = MagState {
+    chip_type: ChipType::Unknown,
+    adres: 0x1E,
+    scale: HMC_SCALE_1_3,
+    initialized: yanlış
+}
+
+// ============================================================================
+// Başlatma
+// ============================================================================
+
+açık fonksiyon init(
+    adres: bayt,
+    gain: tamsayı,
+    sample_rate_hz: tamsayı
+) -> Sonuç<(), Hata> yap
+    // Chip türünü algıla
+    state.chip_type = detect_chip(adres)
+    
+    eşle state.chip_type {
+        ChipType::HMC5883L => init_hmc5883l(adres, gain, sample_rate_hz)?,
+        ChipType::QMC5883 => init_qmc5883(gain, sample_rate_hz)?,
+        ChipType::Unknown => {
+            // QMC5883 adresini dene
+            state.chip_type = detect_chip(QMC_ADDR)
+            eğer state.chip_type == ChipType::QMC5883 yap
+                init_qmc5883(gain, sample_rate_hz)?
+            yoksa yap
+                dön Hata("Magnetometer bulunamadı")
+            son
+        }
+    }
+    
+    state.initialized = doğru
+    yaz("[MAG] Chip: {:?}, Adres: 0x{:02X}", state.chip_type, state.adres)
+    
+    dön Tamam(())
+son
+
+fonksiyon detect_chip(adres: bayt) -> ChipType yap
+    // HMC5883L ID kontrolü (0x1E adresinde 'H' 0x48, '4' 0x34, '3' 0x33)
+    eğer adres == HMC_ADDR yap
+        eşle i2c::read_bytes(adres, HMC_REG_ID_A, 3) {
+            Tamam(id) => {
+                eğer id[0] == 0x48 ve id[1] == 0x34 ve id[2] == 0x33 yap
+                    dön ChipType::HMC5883L
+                son
+            },
+            Hata(_) => {}
+        }
+    son
+    
+    // QMC5883 ID kontrolü
+    eğer adres == QMC_ADDR yap
+        eşle i2c::read_byte(QMC_ADDR, QMC_REG_CHIP_ID) {
+            Tamam(id) => {
+                eğer id == 0xFF yap
+                    dön ChipType::QMC5883
+                son
+            },
+            Hata(_) => {}
+        }
+    son
+    
+    dön ChipType::Unknown
+son
+
+fonksiyon init_hmc5883l(adres: bayt, gain: tamsayı, sample_rate: tamsayı) -> Sonuç<(), Hata> yap
+    state.adres = adres
+    
+    // Sample rate yapılandır
+    olsun config_a = eşle sample_rate {
+        1 => 0x04,   // 1.5 Hz
+        3 => 0x08,   // 3 Hz
+        8 => 0x0C,   // 7.5 Hz
+        15 => 0x10,  // 15 Hz (varsayılan)
+        30 => 0x14,  // 30 Hz
+        75 => 0x18,  // 75 Hz
+        _ => 0x10    // 15 Hz
+    }
+    // Normal ölçüm, 8 sample averaging
+    i2c::write_byte(adres, HMC_REG_CONFIG_A, config_a | 0x60)?
+    
+    // Gain yapılandır
+    olsun config_b = eşle gain {
+        1 => { state.scale = HMC_SCALE_0_88; HMC_GAIN_0_88 },
+        2 => { state.scale = HMC_SCALE_1_3; HMC_GAIN_1_3 },
+        3 => { state.scale = HMC_SCALE_1_9; HMC_GAIN_1_9 },
+        4 => { state.scale = HMC_SCALE_2_5; HMC_GAIN_2_5 },
+        5 => { state.scale = HMC_SCALE_4_0; HMC_GAIN_4_0 },
+        6 => { state.scale = HMC_SCALE_4_7; HMC_GAIN_4_7 },
+        7 => { state.scale = HMC_SCALE_5_6; HMC_GAIN_5_6 },
+        8 => { state.scale = HMC_SCALE_8_1; HMC_GAIN_8_1 },
+        _ => { state.scale = HMC_SCALE_1_3; HMC_GAIN_1_3 }
+    }
+    i2c::write_byte(adres, HMC_REG_CONFIG_B, config_b)?
+    
+    // Continuous measurement mode
+    i2c::write_byte(adres, HMC_REG_MODE, 0x00)?
+    
+    timer::delay_ms(10)
+    
+    dön Tamam(())
+son
+
+fonksiyon init_qmc5883(gain: tamsayı, sample_rate: tamsayı) -> Sonuç<(), Hata> yap
+    state.adres = QMC_ADDR
+    
+    // Soft reset
+    i2c::write_byte(QMC_ADDR, QMC_REG_CONTROL2, 0x80)?
+    timer::delay_ms(10)
+    
+    // Period register
+    i2c::write_byte(QMC_ADDR, QMC_REG_PERIOD, 0x01)?
+    
+    // Control register 1:
+    // Bits 7-6: OSR (Over Sample Ratio) - 00 = 512
+    // Bits 5-4: RNG (Range) - 00 = 2G, 01 = 8G
+    // Bits 3-2: ODR (Output Data Rate) - 00 = 10Hz, 01 = 50Hz, 10 = 100Hz, 11 = 200Hz
+    // Bits 1-0: Mode - 01 = Continuous
+    
+    olsun range = eğer gain <= 2 yap
+        state.scale = QMC_SCALE_2G
+        0x00  // ±2 Gauss
+    yoksa yap
+        state.scale = QMC_SCALE_8G
+        0x10  // ±8 Gauss
+    son
+    
+    olsun odr = eşle sample_rate {
+        10 => 0x00,
+        50 => 0x04,
+        100 => 0x08,
+        200 => 0x0C,
+        _ => 0x08  // 100Hz varsayılan
+    }
+    
+    olsun control1 = range | odr | 0x01  // Continuous mode
+    i2c::write_byte(QMC_ADDR, QMC_REG_CONTROL1, control1)?
+    
+    timer::delay_ms(10)
+    
+    dön Tamam(())
+son
+
+// ============================================================================
+// Bağlantı Testi
+// ============================================================================
+
+açık fonksiyon test_connection() -> mantıksal yap
+    eşle state.chip_type {
+        ChipType::HMC5883L => {
+            eşle i2c::read_byte(state.adres, HMC_REG_ID_A) {
+                Tamam(id) => dön id == 0x48,  // 'H'
+                Hata(_) => dön yanlış
+            }
+        },
+        ChipType::QMC5883 => {
+            eşle i2c::read_byte(state.adres, QMC_REG_CHIP_ID) {
+                Tamam(_) => dön doğru,
+                Hata(_) => dön yanlış
+            }
+        },
+        ChipType::Unknown => dön yanlış
+    }
+son
+
+// ============================================================================
+// Veri Okuma
+// ============================================================================
+
+açık fonksiyon read_mag() -> Sonuç<[kesirli; 3], Hata> yap
+    eşle state.chip_type {
+        ChipType::HMC5883L => read_hmc5883l(),
+        ChipType::QMC5883 => read_qmc5883(),
+        ChipType::Unknown => Hata("Chip başlatılmadı")
+    }
+son
+
+fonksiyon read_hmc5883l() -> Sonuç<[kesirli; 3], Hata> yap
+    // Status kontrolü
+    olsun status = i2c::read_byte(state.adres, HMC_REG_STATUS)?
+    eğer (status & 0x01) == 0 yap
+        // Veri hazır değil, eski değeri kullan
+    son
+    
+    // HMC5883L: X, Z, Y sıralaması (!)
+    olsun raw = i2c::read_bytes(state.adres, HMC_REG_DATA_X_H, 6)?
+    
+    olsun x = ((raw[0] olarak i16) << 8) | (raw[1] olarak i16)
+    olsun z = ((raw[2] olarak i16) << 8) | (raw[3] olarak i16)
+    olsun y = ((raw[4] olarak i16) << 8) | (raw[5] olarak i16)
+    
+    // Overflow kontrolü (-4096 geçersiz değer)
+    eğer x == -4096 veya y == -4096 veya z == -4096 yap
+        dön Hata("Magnetometer overflow")
+    son
+    
+    dön Tamam([
+        (x olarak kesirli) / state.scale,
+        (y olarak kesirli) / state.scale,
+        (z olarak kesirli) / state.scale
+    ])
+son
+
+fonksiyon read_qmc5883() -> Sonuç<[kesirli; 3], Hata> yap
+    // Status kontrolü
+    olsun status = i2c::read_byte(state.adres, QMC_REG_STATUS)?
+    eğer (status & 0x01) == 0 yap
+        // Veri hazır değil
+    son
+    
+    // QMC5883: X, Y, Z sıralaması, Low byte first
+    olsun raw = i2c::read_bytes(state.adres, QMC_REG_DATA_X_L, 6)?
+    
+    olsun x = ((raw[1] olarak i16) << 8) | (raw[0] olarak i16)
+    olsun y = ((raw[3] olarak i16) << 8) | (raw[2] olarak i16)
+    olsun z = ((raw[5] olarak i16) << 8) | (raw[4] olarak i16)
+    
+    dön Tamam([
+        (x olarak kesirli) / state.scale,
+        (y olarak kesirli) / state.scale,
+        (z olarak kesirli) / state.scale
+    ])
+son
+
+// ============================================================================
+// Ham Veri Okuma
+// ============================================================================
+
+açık fonksiyon read_raw() -> Sonuç<[i16; 3], Hata> yap
+    eşle state.chip_type {
+        ChipType::HMC5883L => {
+            olsun raw = i2c::read_bytes(state.adres, HMC_REG_DATA_X_H, 6)?
+            olsun x = ((raw[0] olarak i16) << 8) | (raw[1] olarak i16)
+            olsun z = ((raw[2] olarak i16) << 8) | (raw[3] olarak i16)
+            olsun y = ((raw[4] olarak i16) << 8) | (raw[5] olarak i16)
+            dön Tamam([x, y, z])
+        },
+        ChipType::QMC5883 => {
+            olsun raw = i2c::read_bytes(state.adres, QMC_REG_DATA_X_L, 6)?
+            olsun x = ((raw[1] olarak i16) << 8) | (raw[0] olarak i16)
+            olsun y = ((raw[3] olarak i16) << 8) | (raw[2] olarak i16)
+            olsun z = ((raw[5] olarak i16) << 8) | (raw[4] olarak i16)
+            dön Tamam([x, y, z])
+        },
+        ChipType::Unknown => dön Hata("Chip başlatılmadı")
+    }
+son
+
+// ============================================================================
+// Kalibrasyon
+// ============================================================================
+
+yapı CalibrationData yap
+    offset: [kesirli; 3],
+    scale: [kesirli; 3]
+son
+
+açık fonksiyon calibrate(samples: tamsayı) -> Sonuç<CalibrationData, Hata> yap
+    yaz("[MAG] Kalibrasyon başlıyor... Cihazı tüm yönlerde çevirin!")
+    
+    değişken min_vals: [kesirli; 3] = [10000.0, 10000.0, 10000.0]
+    değişken max_vals: [kesirli; 3] = [-10000.0, -10000.0, -10000.0]
+    
+    için _ içinde 0..samples yap
+        olsun mag = read_mag()?
+        
+        için i içinde 0..3 yap
+            eğer mag[i] < min_vals[i] yap
+                min_vals[i] = mag[i]
+            son
+            eğer mag[i] > max_vals[i] yap
+                max_vals[i] = mag[i]
+            son
+        son
+        
+        timer::delay_ms(20)
+    son
+    
+    // Hard iron offset (merkez)
+    olsun offset = [
+        (max_vals[0] + min_vals[0]) / 2.0,
+        (max_vals[1] + min_vals[1]) / 2.0,
+        (max_vals[2] + min_vals[2]) / 2.0
+    ]
+    
+    // Soft iron scale
+    olsun avg_delta = (
+        (max_vals[0] - min_vals[0]) +
+        (max_vals[1] - min_vals[1]) +
+        (max_vals[2] - min_vals[2])
+    ) / 3.0
+    
+    olsun scale = [
+        avg_delta / (max_vals[0] - min_vals[0]),
+        avg_delta / (max_vals[1] - min_vals[1]),
+        avg_delta / (max_vals[2] - min_vals[2])
+    ]
+    
+    yaz("[MAG] Kalibrasyon tamamlandı")
+    yaz("[MAG] Offset: [{:.3}, {:.3}, {:.3}]", offset[0], offset[1], offset[2])
+    yaz("[MAG] Scale: [{:.3}, {:.3}, {:.3}]", scale[0], scale[1], scale[2])
+    
+    dön Tamam(CalibrationData { offset, scale })
+son
+
+// ============================================================================
+// Utility
+// ============================================================================
+
+açık fonksiyon get_chip_name() -> metin yap
+    eşle state.chip_type {
+        ChipType::HMC5883L => dön "HMC5883L",
+        ChipType::QMC5883 => dön "QMC5883",
+        ChipType::Unknown => dön "Unknown"
+    }
+son

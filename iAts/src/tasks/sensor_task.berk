@@ -1,0 +1,311 @@
+// ============================================================================
+// iAts BERK - Sensör Okuma Görevi
+// ============================================================================
+// MPU6050 (IMU) + HMC5883L/QMC5883 (Magnetometer) okuma ve füzyon
+// ============================================================================
+
+modül sensor_task
+
+kullan config
+kullan drivers::mpu6050
+kullan drivers::hmc5883l
+kullan algorithms::kalman
+kullan hal::i2c
+kullan hal::timer
+kullan std::sync
+kullan std::math
+
+// ============================================================================
+// Sensör Durumu
+// ============================================================================
+
+yapı SensorState yap
+    // Ham sensör verileri
+    raw_gyro: [kesirli; 3],
+    raw_accel: [kesirli; 3],
+    raw_mag: [kesirli; 3],
+    
+    // Kalibre edilmiş veriler
+    cal_gyro: [kesirli; 3],
+    cal_accel: [kesirli; 3],
+    cal_mag: [kesirli; 3],
+    
+    // Kalman filtre durumu
+    kalman: kalman::KalmanState,
+    
+    // Hesaplanmış açılar
+    heading: kesirli,
+    pitch: kesirli,
+    roll: kesirli,
+    
+    // Kalibrasyon verileri
+    gyro_offset: [kesirli; 3],
+    accel_offset: [kesirli; 3],
+    mag_offset: [kesirli; 3],
+    mag_scale: [kesirli; 3],
+    
+    // Zaman takibi
+    last_update_us: tamsayı,
+    dt_s: kesirli
+son
+
+statik değişken state: SensorState = SensorState {
+    raw_gyro: [0.0, 0.0, 0.0],
+    raw_accel: [0.0, 0.0, 0.0],
+    raw_mag: [0.0, 0.0, 0.0],
+    cal_gyro: [0.0, 0.0, 0.0],
+    cal_accel: [0.0, 0.0, 0.0],
+    cal_mag: [0.0, 0.0, 0.0],
+    kalman: kalman::KalmanState::new(),
+    heading: 0.0,
+    pitch: 0.0,
+    roll: 0.0,
+    gyro_offset: [0.0, 0.0, 0.0],
+    accel_offset: [0.0, 0.0, 0.0],
+    mag_offset: [0.0, 0.0, 0.0],
+    mag_scale: [1.0, 1.0, 1.0],
+    last_update_us: 0,
+    dt_s: 0.005
+}
+
+// ============================================================================
+// Başlatma
+// ============================================================================
+
+açık fonksiyon init() -> Sonuç<(), Hata> yap
+    yaz("[SENSOR] Sensörler başlatılıyor...")
+    
+    // MPU6050 başlat
+    mpu6050::init(
+        config::IMU.adres,
+        config::IMU.gyro_range,
+        config::IMU.accel_range,
+        config::IMU.dlpf_mode
+    )?
+    
+    // MPU6050 bağlantı testi
+    eğer değil mpu6050::test_connection() yap
+        dön Hata("MPU6050 bağlantı hatası")
+    son
+    yaz("[SENSOR] MPU6050 OK")
+    
+    // HMC5883L başlat
+    hmc5883l::init(
+        config::MAG.adres,
+        config::MAG.gain,
+        config::MAG.sample_rate_hz
+    )?
+    
+    // HMC5883L bağlantı testi
+    eğer değil hmc5883l::test_connection() yap
+        dön Hata("HMC5883L bağlantı hatası")
+    son
+    yaz("[SENSOR] HMC5883L OK")
+    
+    // Gyro kalibrasyonu (hareket etmeden bekle)
+    yaz("[SENSOR] Gyro kalibrasyonu... Hareketsiz bekleyin!")
+    timer::delay_ms(1000)
+    gyro_kalibre()?
+    yaz("[SENSOR] Gyro kalibrasyonu tamamlandı")
+    
+    // Kalman filtre başlat
+    state.kalman = kalman::KalmanState::new_with_config(&config::KALMAN)
+    
+    yaz("[SENSOR] Sensör başlatma tamamlandı")
+    dön Tamam(())
+son
+
+// ============================================================================
+// Kalibrasyon
+// ============================================================================
+
+fonksiyon gyro_kalibre() -> Sonuç<(), Hata> yap
+    sabit SAMPLE_COUNT: tamsayı = 500
+    değişken sum: [kesirli; 3] = [0.0, 0.0, 0.0]
+    
+    için i içinde 0..SAMPLE_COUNT yap
+        olsun gyro = mpu6050::read_gyro()?
+        sum[0] = sum[0] + gyro[0]
+        sum[1] = sum[1] + gyro[1]
+        sum[2] = sum[2] + gyro[2]
+        timer::delay_ms(2)
+    son
+    
+    state.gyro_offset[0] = sum[0] / (SAMPLE_COUNT olarak kesirli)
+    state.gyro_offset[1] = sum[1] / (SAMPLE_COUNT olarak kesirli)
+    state.gyro_offset[2] = sum[2] / (SAMPLE_COUNT olarak kesirli)
+    
+    dön Tamam(())
+son
+
+// ============================================================================
+// Ana Görev Döngüsü
+// ============================================================================
+
+açık fonksiyon run(
+    output_buffer: &sync::RingBuffer<SensorData, 16>,
+    period_ms: tamsayı
+) yap
+    yaz("[SENSOR] Sensör görevi başladı")
+    
+    döngü yap
+        olsun start_us = timer::micros()
+        
+        // Delta time hesapla
+        eğer state.last_update_us > 0 yap
+            state.dt_s = ((start_us - state.last_update_us) olarak kesirli) / 1_000_000.0
+        son
+        state.last_update_us = start_us
+        
+        // Sensörleri oku
+        eğer sensor_oku().is_ok() yap
+            // Kalibrasyon uygula
+            kalibrasyon_uygula()
+            
+            // Sensor füzyon (Kalman)
+            sensor_fuzyon()
+            
+            // Sonuçları buffer'a yaz
+            olsun sensor_data = SensorData {
+                gyro_x: state.cal_gyro[0],
+                gyro_y: state.cal_gyro[1],
+                gyro_z: state.cal_gyro[2],
+                accel_x: state.cal_accel[0],
+                accel_y: state.cal_accel[1],
+                accel_z: state.cal_accel[2],
+                mag_x: state.cal_mag[0],
+                mag_y: state.cal_mag[1],
+                mag_z: state.cal_mag[2],
+                heading: state.heading,
+                pitch: state.pitch,
+                roll: state.roll,
+                timestamp_ms: timer::millis()
+            }
+            
+            output_buffer.write(sensor_data)
+        son
+        
+        // Periyodik bekleme
+        olsun elapsed_us = timer::micros() - start_us
+        olsun sleep_us = (period_ms * 1000) - (elapsed_us olarak tamsayı)
+        eğer sleep_us > 0 yap
+            timer::delay_us(sleep_us)
+        son
+    son
+son
+
+// ============================================================================
+// Sensör Okuma
+// ============================================================================
+
+fonksiyon sensor_oku() -> Sonuç<(), Hata> yap
+    // IMU oku
+    state.raw_gyro = mpu6050::read_gyro()?
+    state.raw_accel = mpu6050::read_accel()?
+    
+    // Magnetometer oku
+    state.raw_mag = hmc5883l::read_mag()?
+    
+    dön Tamam(())
+son
+
+fonksiyon kalibrasyon_uygula() yap
+    // Gyro offset çıkar
+    state.cal_gyro[0] = state.raw_gyro[0] - state.gyro_offset[0]
+    state.cal_gyro[1] = state.raw_gyro[1] - state.gyro_offset[1]
+    state.cal_gyro[2] = state.raw_gyro[2] - state.gyro_offset[2]
+    
+    // Accel offset çıkar
+    state.cal_accel[0] = state.raw_accel[0] - state.accel_offset[0]
+    state.cal_accel[1] = state.raw_accel[1] - state.accel_offset[1]
+    state.cal_accel[2] = state.raw_accel[2] - state.accel_offset[2]
+    
+    // Mag hard/soft iron kompanzasyonu
+    state.cal_mag[0] = (state.raw_mag[0] - state.mag_offset[0]) * state.mag_scale[0]
+    state.cal_mag[1] = (state.raw_mag[1] - state.mag_offset[1]) * state.mag_scale[1]
+    state.cal_mag[2] = (state.raw_mag[2] - state.mag_offset[2]) * state.mag_scale[2]
+son
+
+// ============================================================================
+// Sensör Füzyon (Extended Kalman Filter)
+// ============================================================================
+
+fonksiyon sensor_fuzyon() yap
+    // 1. Predict adımı (gyro ile)
+    state.kalman.predict(
+        state.cal_gyro[0],
+        state.cal_gyro[1],
+        state.cal_gyro[2],
+        state.dt_s
+    )
+    
+    // 2. Accelerometer'dan pitch ve roll hesapla
+    olsun accel_pitch = math::atan2(
+        state.cal_accel[0],
+        math::sqrt(state.cal_accel[1] * state.cal_accel[1] + 
+                   state.cal_accel[2] * state.cal_accel[2])
+    ) * 180.0 / math::PI
+    
+    olsun accel_roll = math::atan2(
+        state.cal_accel[1],
+        state.cal_accel[2]
+    ) * 180.0 / math::PI
+    
+    // 3. Update adımı (accelerometer ile)
+    state.kalman.update_accel(accel_pitch, accel_roll)
+    
+    // 4. Tilt-kompanzasyonlu heading hesapla
+    olsun cos_roll = math::cos(state.kalman.roll * math::PI / 180.0)
+    olsun sin_roll = math::sin(state.kalman.roll * math::PI / 180.0)
+    olsun cos_pitch = math::cos(state.kalman.pitch * math::PI / 180.0)
+    olsun sin_pitch = math::sin(state.kalman.pitch * math::PI / 180.0)
+    
+    olsun mag_x_comp = state.cal_mag[0] * cos_pitch + 
+                       state.cal_mag[2] * sin_pitch
+    olsun mag_y_comp = state.cal_mag[0] * sin_roll * sin_pitch +
+                       state.cal_mag[1] * cos_roll -
+                       state.cal_mag[2] * sin_roll * cos_pitch
+    
+    değişken heading = math::atan2(-mag_y_comp, mag_x_comp) * 180.0 / math::PI
+    
+    // Manyetik sapma ekle
+    heading = heading + config::MAG.declination_deg
+    
+    // 0-360 aralığına normalize et
+    eğer heading < 0.0 yap
+        heading = heading + 360.0
+    son
+    eğer heading >= 360.0 yap
+        heading = heading - 360.0
+    son
+    
+    // 5. Heading update
+    state.kalman.update_heading(heading)
+    
+    // 6. Sonuçları kaydet
+    state.heading = state.kalman.heading
+    state.pitch = state.kalman.pitch
+    state.roll = state.kalman.roll
+son
+
+// ============================================================================
+// Harici API
+// ============================================================================
+
+açık fonksiyon get_heading() -> kesirli yap
+    dön state.heading
+son
+
+açık fonksiyon get_pitch() -> kesirli yap
+    dön state.pitch
+son
+
+açık fonksiyon get_roll() -> kesirli yap
+    dön state.roll
+son
+
+açık fonksiyon is_calibrated() -> mantıksal yap
+    dön state.gyro_offset[0] != 0.0 veya 
+           state.gyro_offset[1] != 0.0 veya 
+           state.gyro_offset[2] != 0.0
+son

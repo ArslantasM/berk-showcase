@@ -1,0 +1,307 @@
+// ============================================================================
+// iAts BERK - Servo Kontrol Görevi
+// ============================================================================
+// Pan/Tilt servo kontrolü, PWM çıkışı
+// ============================================================================
+
+modül servo_task
+
+kullan config
+kullan drivers::servo
+kullan hal::pwm
+kullan hal::timer
+kullan std::sync
+kullan std::math
+
+// ============================================================================
+// Servo Durumu
+// ============================================================================
+
+yapı ServoState yap
+    // Mevcut açılar
+    pan_current: kesirli,
+    tilt_current: kesirli,
+    
+    // Hedef açılar
+    pan_target: kesirli,
+    tilt_target: kesirli,
+    
+    // Hız değerleri
+    pan_speed: kesirli,
+    tilt_speed: kesirli,
+    
+    // PWM değerleri (mikrosaniye)
+    pan_pwm_us: tamsayı,
+    tilt_pwm_us: tamsayı,
+    
+    // Durum bayrakları
+    servos_enabled: mantıksal,
+    motion_complete: mantıksal,
+    
+    // Zaman takibi
+    last_update_ms: tamsayı
+son
+
+statik değişken state: ServoState = ServoState {
+    pan_current: 0.0,
+    tilt_current: 0.0,
+    pan_target: 0.0,
+    tilt_target: 0.0,
+    pan_speed: 0.0,
+    tilt_speed: 0.0,
+    pan_pwm_us: 1500,
+    tilt_pwm_us: 1500,
+    servos_enabled: yanlış,
+    motion_complete: doğru,
+    last_update_ms: 0
+}
+
+// ============================================================================
+// Başlatma
+// ============================================================================
+
+açık fonksiyon init() -> Sonuç<(), Hata> yap
+    yaz("[SERVO] Servo modülü başlatılıyor...")
+    
+    // PWM kanallarını yapılandır
+    pwm::init(config::PINS.servo_pan_pin, config::SERVO.pan.pwm_freq)?
+    pwm::init(config::PINS.servo_tilt_pin, config::SERVO.tilt.pwm_freq)?
+    
+    // Başlangıç pozisyonuna git
+    state.pan_current = 0.0
+    state.tilt_current = 0.0
+    state.pan_target = 0.0
+    state.tilt_target = 0.0
+    
+    // Servoları merkeze al
+    servo_pwm_yaz(config::PINS.servo_pan_pin, angle_to_pwm(0.0, &config::SERVO.pan))
+    servo_pwm_yaz(config::PINS.servo_tilt_pin, angle_to_pwm(0.0, &config::SERVO.tilt))
+    
+    state.servos_enabled = doğru
+    
+    yaz("[SERVO] Servolar merkeze alındı")
+    yaz("[SERVO] Servo modülü hazır")
+    dön Tamam(())
+son
+
+// ============================================================================
+// Ana Görev Döngüsü
+// ============================================================================
+
+açık fonksiyon run(
+    command_input: &sync::RingBuffer<ServoCommand, 8>,
+    status_output: &sync::RingBuffer<SystemStatus, 4>,
+    period_ms: tamsayı
+) yap
+    yaz("[SERVO] Servo görevi başladı")
+    
+    döngü yap
+        olsun start_ms = timer::millis()
+        olsun dt_s = (start_ms - state.last_update_ms) olarak kesirli / 1000.0
+        state.last_update_ms = start_ms
+        
+        // Komut oku
+        eğer olsun Bazı(cmd) = command_input.read() yap
+            state.pan_target = cmd.pan_angle
+            state.tilt_target = cmd.tilt_angle
+            state.pan_speed = cmd.pan_speed
+            state.tilt_speed = cmd.tilt_speed
+            state.motion_complete = yanlış
+        son
+        
+        // Servolar aktifse hareket et
+        eğer state.servos_enabled yap
+            servo_hareket(dt_s)
+        son
+        
+        // Durum güncelle
+        olsun status = SystemStatus {
+            pan_angle: state.pan_current,
+            tilt_angle: state.tilt_current,
+            pan_pwm: state.pan_pwm_us,
+            tilt_pwm: state.tilt_pwm_us,
+            servos_enabled: state.servos_enabled,
+            motion_complete: state.motion_complete,
+            timestamp_ms: timer::millis()
+        }
+        status_output.write(status)
+        
+        // Periyodik bekleme
+        olsun elapsed = timer::millis() - start_ms
+        eğer elapsed < period_ms yap
+            timer::delay_ms(period_ms - elapsed)
+        son
+    son
+son
+
+// ============================================================================
+// Servo Hareket
+// ============================================================================
+
+fonksiyon servo_hareket(dt_s: kesirli) yap
+    // Pan servo
+    state.pan_current = smooth_move(
+        state.pan_current,
+        state.pan_target,
+        state.pan_speed,
+        dt_s,
+        config::SERVO.pan.min_angle,
+        config::SERVO.pan.max_angle
+    )
+    
+    // Tilt servo
+    state.tilt_current = smooth_move(
+        state.tilt_current,
+        state.tilt_target,
+        state.tilt_speed,
+        dt_s,
+        config::SERVO.tilt.min_angle,
+        config::SERVO.tilt.max_angle
+    )
+    
+    // PWM değerlerini hesapla
+    state.pan_pwm_us = angle_to_pwm(state.pan_current, &config::SERVO.pan)
+    state.tilt_pwm_us = angle_to_pwm(state.tilt_current, &config::SERVO.tilt)
+    
+    // PWM çıkışı
+    servo_pwm_yaz(config::PINS.servo_pan_pin, state.pan_pwm_us)
+    servo_pwm_yaz(config::PINS.servo_tilt_pin, state.tilt_pwm_us)
+    
+    // Hareket tamamlandı mı kontrol et
+    olsun pan_diff = math::abs(state.pan_target - state.pan_current)
+    olsun tilt_diff = math::abs(state.tilt_target - state.tilt_current)
+    state.motion_complete = pan_diff < 0.5 ve tilt_diff < 0.5
+son
+
+// ============================================================================
+// Yardımcı Fonksiyonlar
+// ============================================================================
+
+fonksiyon smooth_move(
+    current: kesirli,
+    target: kesirli,
+    speed: kesirli,
+    dt: kesirli,
+    min_limit: kesirli,
+    max_limit: kesirli
+) -> kesirli yap
+    olsun diff = target - current
+    olsun max_delta = speed * dt
+    
+    değişken new_value: kesirli
+    
+    eğer math::abs(diff) <= max_delta yap
+        new_value = target
+    yoksa eğer diff > 0.0 yap
+        new_value = current + max_delta
+    yoksa yap
+        new_value = current - max_delta
+    son
+    
+    // Limitleri uygula
+    eğer new_value < min_limit yap
+        new_value = min_limit
+    son
+    eğer new_value > max_limit yap
+        new_value = max_limit
+    son
+    
+    dön new_value
+son
+
+fonksiyon angle_to_pwm(angle: kesirli, cfg: &ServoConfig) -> tamsayı yap
+    // Açıyı 0-1 aralığına normalize et
+    olsun range = cfg.max_angle - cfg.min_angle
+    olsun normalized = (angle - cfg.min_angle) / range
+    
+    // PWM aralığına dönüştür
+    olsun pwm_range = cfg.pwm_max - cfg.pwm_min
+    olsun pwm = cfg.pwm_min + (normalized * (pwm_range olarak kesirli)) olarak tamsayı
+    
+    // Reverse uygula
+    eğer cfg.reversed yap
+        pwm = cfg.pwm_max - (pwm - cfg.pwm_min)
+    son
+    
+    // PWM limitleri
+    eğer pwm < cfg.pwm_min yap
+        pwm = cfg.pwm_min
+    son
+    eğer pwm > cfg.pwm_max yap
+        pwm = cfg.pwm_max
+    son
+    
+    dön pwm
+son
+
+fonksiyon servo_pwm_yaz(pin: tamsayı, pulse_us: tamsayı) yap
+    // PWM duty cycle hesapla (50Hz, 20ms periyot)
+    // pulse_us / 20000 * 100 = duty %
+    olsun duty_percent = (pulse_us olarak kesirli) / 200.0
+    pwm::set_duty(pin, duty_percent)
+son
+
+// ============================================================================
+// Harici API
+// ============================================================================
+
+açık fonksiyon enable() yap
+    state.servos_enabled = doğru
+    yaz("[SERVO] Servolar aktif")
+son
+
+açık fonksiyon disable() yap
+    state.servos_enabled = yanlış
+    yaz("[SERVO] Servolar deaktif")
+son
+
+açık fonksiyon set_position(pan: kesirli, tilt: kesirli) yap
+    state.pan_target = pan
+    state.tilt_target = tilt
+    state.motion_complete = yanlış
+son
+
+açık fonksiyon get_pan() -> kesirli yap
+    dön state.pan_current
+son
+
+açık fonksiyon get_tilt() -> kesirli yap
+    dön state.tilt_current
+son
+
+açık fonksiyon is_motion_complete() -> mantıksal yap
+    dön state.motion_complete
+son
+
+açık fonksiyon center() yap
+    state.pan_target = 0.0
+    state.tilt_target = 0.0
+    state.motion_complete = yanlış
+    yaz("[SERVO] Merkeze dönülüyor")
+son
+
+// ============================================================================
+// Test ve Kalibrasyon
+// ============================================================================
+
+açık fonksiyon test_sweep() yap
+    yaz("[SERVO] Test sweep başlıyor...")
+    
+    // Pan sweep
+    set_position(-90.0, 0.0)
+    timer::delay_ms(2000)
+    set_position(90.0, 0.0)
+    timer::delay_ms(2000)
+    set_position(0.0, 0.0)
+    timer::delay_ms(1000)
+    
+    // Tilt sweep
+    set_position(0.0, -45.0)
+    timer::delay_ms(2000)
+    set_position(0.0, 90.0)
+    timer::delay_ms(2000)
+    set_position(0.0, 0.0)
+    timer::delay_ms(1000)
+    
+    yaz("[SERVO] Test sweep tamamlandı")
+son

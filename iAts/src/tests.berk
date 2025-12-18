@@ -1,0 +1,335 @@
+// ============================================================================
+// iAts BERK - Test Suite
+// ============================================================================
+// Birim ve entegrasyon testleri
+// ============================================================================
+
+modül tests
+
+kullan algorithms::navigation
+kullan algorithms::kalman
+kullan algorithms::pid
+kullan protocols::nmea
+kullan protocols::mavlink
+kullan protocols::ltm
+
+// ============================================================================
+// Navigation Tests
+// ============================================================================
+
+test fonksiyon test_haversine_distance() yap
+    // İstanbul - Ankara mesafesi
+    olsun istanbul = navigation::GeoPoint::new(41.0082, 28.9784, 0.0)
+    olsun ankara = navigation::GeoPoint::new(39.9334, 32.8597, 0.0)
+    
+    olsun distance = navigation::haversine_distance(&istanbul, &ankara)
+    
+    // Yaklaşık 350 km olmalı
+    doğrula(distance > 340000.0 ve distance < 360000.0, 
+            "İstanbul-Ankara mesafesi ~350km olmalı")
+    
+    yaz("[TEST] Haversine distance: {:.1} km", distance / 1000.0)
+son
+
+test fonksiyon test_bearing() yap
+    // Kuzey noktasına bearing 0° olmalı
+    olsun p1 = navigation::GeoPoint::new(40.0, 30.0, 0.0)
+    olsun p2 = navigation::GeoPoint::new(41.0, 30.0, 0.0)  // Tam kuzeyde
+    
+    olsun brg = navigation::bearing(&p1, &p2)
+    
+    doğrula(brg < 1.0 veya brg > 359.0, 
+            "Kuzey yönü 0° civarında olmalı")
+    
+    // Doğu noktasına bearing 90° olmalı
+    olsun p3 = navigation::GeoPoint::new(40.0, 31.0, 0.0)  // Doğuda
+    olsun brg_east = navigation::bearing(&p1, &p3)
+    
+    doğrula(brg_east > 88.0 ve brg_east < 92.0,
+            "Doğu yönü ~90° olmalı")
+    
+    yaz("[TEST] Bearing kuzey: {:.1}°, doğu: {:.1}°", brg, brg_east)
+son
+
+test fonksiyon test_elevation() yap
+    olsun ground = navigation::GeoPoint::new(40.0, 30.0, 0.0)
+    olsun air = navigation::GeoPoint::new(40.0, 30.01, 1000.0)  // 1km yukarıda
+    
+    olsun elev = navigation::elevation(&ground, &air)
+    
+    doğrula(elev > 0.0, "Yüksekteki hedef için elevation pozitif olmalı")
+    
+    yaz("[TEST] Elevation: {:.1}°", elev)
+son
+
+test fonksiyon test_angle_difference() yap
+    // Normal fark
+    olsun diff1 = navigation::angle_difference(10.0, 30.0)
+    doğrula(diff1 == 20.0, "10° ile 30° arası 20° olmalı")
+    
+    // Wrap-around
+    olsun diff2 = navigation::angle_difference(350.0, 10.0)
+    doğrula(diff2 == 20.0, "350° ile 10° arası 20° olmalı (wrap)")
+    
+    // Negatif fark
+    olsun diff3 = navigation::angle_difference(30.0, 10.0)
+    doğrula(diff3 == -20.0, "30° ile 10° arası -20° olmalı")
+    
+    yaz("[TEST] Angle differences: {}, {}, {}", diff1, diff2, diff3)
+son
+
+// ============================================================================
+// Kalman Filter Tests
+// ============================================================================
+
+test fonksiyon test_kalman_predict() yap
+    değişken kalman = kalman::KalmanState::new()
+    
+    // Initial state
+    doğrula(kalman.heading == 0.0, "Başlangıç heading 0 olmalı")
+    doğrula(kalman.pitch == 0.0, "Başlangıç pitch 0 olmalı")
+    
+    // Predict with gyro
+    kalman.predict(0.0, 10.0, 0.0, 0.1)  // 10°/s pitch rate, 0.1s
+    
+    doğrula(kalman.pitch > 0.0, "Pitch pozitif olmalı")
+    
+    yaz("[TEST] Kalman predict: pitch = {:.2}°", kalman.pitch)
+son
+
+test fonksiyon test_kalman_update() yap
+    değişken kalman = kalman::KalmanState::new()
+    
+    // Set initial heading
+    kalman.heading = 100.0
+    
+    // Update with measurement
+    kalman.update_heading(110.0)
+    
+    // Heading should move toward measurement
+    doğrula(kalman.heading > 100.0 ve kalman.heading < 110.0,
+            "Heading ölçüme doğru hareket etmeli")
+    
+    yaz("[TEST] Kalman update: heading = {:.2}°", kalman.heading)
+son
+
+// ============================================================================
+// PID Controller Tests
+// ============================================================================
+
+test fonksiyon test_pid_proportional() yap
+    değişken pid = pid::PIDController::new_with_config(
+        1.0,   // Kp
+        0.0,   // Ki
+        0.0,   // Kd
+        -100.0,
+        100.0
+    )
+    
+    olsun output = pid.update(10.0)
+    
+    doğrula(output == 10.0, "P-only kontrolcü: output = Kp * error")
+    
+    yaz("[TEST] PID P-only: error=10, output={}", output)
+son
+
+test fonksiyon test_pid_integral() yap
+    değişken pid = pid::PIDController::new_with_config(
+        0.0,   // Kp
+        1.0,   // Ki
+        0.0,   // Kd
+        -100.0,
+        100.0
+    )
+    
+    // Apply error multiple times
+    pid.update_with_dt(10.0, 1.0)
+    pid.update_with_dt(10.0, 1.0)
+    pid.update_with_dt(10.0, 1.0)
+    
+    olsun integral = pid.get_integral()
+    
+    doğrula(integral == 30.0, "3 saniye * 10 error = 30 integral")
+    
+    yaz("[TEST] PID Integral: {}", integral)
+son
+
+test fonksiyon test_pid_anti_windup() yap
+    değişken pid = pid::PIDController::new_with_config(
+        1.0,
+        1.0,
+        0.0,
+        -10.0,  // Output limit
+        10.0
+    )
+    
+    // Large error that would saturate
+    için _ içinde 0..100 yap
+        pid.update_with_dt(100.0, 0.1)
+    son
+    
+    // Output should be clamped
+    doğrula(pid.output <= 10.0, "Output limitte kalmalı")
+    
+    // Integral should not wind up excessively
+    olsun integral = pid.get_integral()
+    doğrula(integral < 50.0, "Anti-windup çalışmalı")
+    
+    yaz("[TEST] PID Anti-windup: output={}, integral={}", pid.output, integral)
+son
+
+// ============================================================================
+// NMEA Parser Tests
+// ============================================================================
+
+test fonksiyon test_nmea_checksum() yap
+    olsun valid = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,47.0,M,,*47"
+    olsun invalid = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,47.0,M,,*FF"
+    
+    doğrula(nmea::verify_checksum(valid), "Geçerli checksum geçmeli")
+    doğrula(değil nmea::verify_checksum(invalid), "Geçersiz checksum başarısız olmalı")
+    
+    yaz("[TEST] NMEA checksum doğrulama OK")
+son
+
+test fonksiyon test_nmea_gga_parse() yap
+    olsun sentence = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,47.0,M,,*47"
+    
+    eşle nmea::parse_gga(sentence) {
+        Tamam(gga) => {
+            // 48°07.038'N = 48.1173°
+            doğrula(gga.latitude > 48.0 ve gga.latitude < 49.0, 
+                    "Enlem ~48° olmalı")
+            
+            // 011°31.000'E = 11.5167°
+            doğrula(gga.longitude > 11.0 ve gga.longitude < 12.0,
+                    "Boylam ~11.5° olmalı")
+            
+            doğrula(gga.fix_quality == 1, "Fix quality 1 olmalı")
+            doğrula(gga.satellites == 8, "8 uydu olmalı")
+            
+            yaz("[TEST] GGA parse: lat={:.4}, lon={:.4}", gga.latitude, gga.longitude)
+        },
+        Hata(e) => {
+            hata!("GGA parse hatası: {}", e)
+        }
+    }
+son
+
+test fonksiyon test_nmea_rmc_parse() yap
+    olsun sentence = "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A"
+    
+    eşle nmea::parse_rmc(sentence) {
+        Tamam(rmc) => {
+            doğrula(rmc.status == 'A', "Status geçerli olmalı")
+            doğrula(rmc.speed_knots > 22.0 ve rmc.speed_knots < 23.0,
+                    "Hız ~22.4 knot olmalı")
+            doğrula(rmc.course > 84.0 ve rmc.course < 85.0,
+                    "Rota ~84.4° olmalı")
+            
+            yaz("[TEST] RMC parse: speed={:.1} knots, course={:.1}°", 
+                rmc.speed_knots, rmc.course)
+        },
+        Hata(e) => {
+            hata!("RMC parse hatası: {}", e)
+        }
+    }
+son
+
+// ============================================================================
+// Entegrasyon Testleri
+// ============================================================================
+
+test fonksiyon test_full_tracking_pipeline() yap
+    // Simüle edilmiş senaryo:
+    // Home: İstanbul (41.0082, 28.9784)
+    // Target: 1km kuzeyde, 100m yukarıda
+    
+    olsun home = navigation::GeoPoint::new(41.0082, 28.9784, 100.0)
+    olsun target = navigation::GeoPoint::new(41.0172, 28.9784, 200.0)  // ~1km kuzey
+    
+    // Navigation hesapla
+    olsun nav = navigation::calculate(&home, &target)
+    
+    yaz("[TEST] Full pipeline:")
+    yaz("  Distance: {:.1} m", nav.distance)
+    yaz("  Azimuth: {:.1}°", nav.azimuth)
+    yaz("  Elevation: {:.1}°", nav.elevation)
+    
+    // Beklenen değerler
+    doğrula(nav.distance > 900.0 ve nav.distance < 1100.0,
+            "Mesafe ~1000m olmalı")
+    doğrula(nav.azimuth < 5.0 veya nav.azimuth > 355.0,
+            "Azimuth kuzeye yakın olmalı")
+    doğrula(nav.elevation > 0.0 ve nav.elevation < 15.0,
+            "Elevation pozitif ve makul olmalı")
+    
+    // PID simülasyonu
+    değişken pid_az = pid::PIDController::new_with_config(
+        0.5, 0.1, 0.05,
+        -45.0, 45.0
+    )
+    
+    // Simüle: Servo şu anda 30° east'te, hedefe yönelmeli
+    değişken current_heading: kesirli = 90.0  // Doğuya bakıyor
+    olsun target_heading = nav.azimuth        // Kuzeye bakmalı
+    
+    için i içinde 0..10 yap
+        olsun error = navigation::angle_difference(current_heading, target_heading)
+        olsun correction = pid_az.update_with_dt(error, 0.1)
+        current_heading = current_heading + correction
+        current_heading = navigation::normalize_bearing(current_heading)
+        
+        yaz("  Step {}: heading={:.1}°, error={:.1}°, correction={:.1}°",
+            i, current_heading, error, correction)
+    son
+    
+    // Final heading hedefe yakın olmalı
+    olsun final_error = navigation::angle_difference(current_heading, target_heading).abs()
+    doğrula(final_error < 10.0, "10 adımda hedefe yaklaşmalı")
+    
+    yaz("[TEST] Final heading error: {:.1}°", final_error)
+son
+
+// ============================================================================
+// Test Runner
+// ============================================================================
+
+açık fonksiyon run_all_tests() yap
+    yaz("========================================")
+    yaz("  iAts BERK Test Suite")
+    yaz("========================================")
+    yaz("")
+    
+    yaz("[Navigation Tests]")
+    test_haversine_distance()
+    test_bearing()
+    test_elevation()
+    test_angle_difference()
+    yaz("")
+    
+    yaz("[Kalman Filter Tests]")
+    test_kalman_predict()
+    test_kalman_update()
+    yaz("")
+    
+    yaz("[PID Controller Tests]")
+    test_pid_proportional()
+    test_pid_integral()
+    test_pid_anti_windup()
+    yaz("")
+    
+    yaz("[NMEA Parser Tests]")
+    test_nmea_checksum()
+    test_nmea_gga_parse()
+    test_nmea_rmc_parse()
+    yaz("")
+    
+    yaz("[Integration Tests]")
+    test_full_tracking_pipeline()
+    yaz("")
+    
+    yaz("========================================")
+    yaz("  Tüm testler başarıyla tamamlandı!")
+    yaz("========================================")
+son

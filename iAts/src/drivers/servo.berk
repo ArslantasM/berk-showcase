@@ -1,0 +1,325 @@
+// ============================================================================
+// iAts BERK - Servo Driver
+// ============================================================================
+// PWM tabanlı servo kontrol sürücüsü
+// ============================================================================
+
+modül servo
+
+kullan hal::pwm
+kullan hal::timer
+
+// ============================================================================
+// Sabitler
+// ============================================================================
+
+sabit SERVO_FREQ_HZ: tamsayı = 50        // Standard servo: 50Hz (20ms period)
+sabit SERVO_MIN_US: tamsayı = 500        // Minimum pulse width (μs)
+sabit SERVO_MAX_US: tamsayı = 2500       // Maximum pulse width (μs)
+sabit SERVO_CENTER_US: tamsayı = 1500    // Center position (μs)
+
+// ============================================================================
+// Servo Yapısı
+// ============================================================================
+
+açık yapı Servo yap
+    pin: tamsayı,
+    min_us: tamsayı,
+    max_us: tamsayı,
+    min_angle: kesirli,
+    max_angle: kesirli,
+    current_us: tamsayı,
+    current_angle: kesirli,
+    reversed: mantıksal,
+    attached: mantıksal
+son
+
+// ============================================================================
+// Yapıcılar
+// ============================================================================
+
+açık fonksiyon Servo::new(pin: tamsayı) -> Servo yap
+    dön Servo {
+        pin: pin,
+        min_us: SERVO_MIN_US,
+        max_us: SERVO_MAX_US,
+        min_angle: -90.0,
+        max_angle: 90.0,
+        current_us: SERVO_CENTER_US,
+        current_angle: 0.0,
+        reversed: yanlış,
+        attached: yanlış
+    }
+son
+
+açık fonksiyon Servo::new_with_range(
+    pin: tamsayı,
+    min_angle: kesirli,
+    max_angle: kesirli,
+    min_us: tamsayı,
+    max_us: tamsayı
+) -> Servo yap
+    dön Servo {
+        pin: pin,
+        min_us: min_us,
+        max_us: max_us,
+        min_angle: min_angle,
+        max_angle: max_angle,
+        current_us: (min_us + max_us) / 2,
+        current_angle: (min_angle + max_angle) / 2.0,
+        reversed: yanlış,
+        attached: yanlış
+    }
+son
+
+// ============================================================================
+// Temel İşlemler
+// ============================================================================
+
+açık fonksiyon Servo::attach(&değişken öz) -> Sonuç<(), Hata> yap
+    eğer öz.attached yap
+        dön Tamam(())
+    son
+    
+    // PWM kanalını başlat
+    pwm::init(öz.pin, SERVO_FREQ_HZ)?
+    öz.attached = doğru
+    
+    // Merkez konumuna git
+    öz.write_us(SERVO_CENTER_US)
+    
+    dön Tamam(())
+son
+
+açık fonksiyon Servo::detach(&değişken öz) yap
+    eğer öz.attached yap
+        pwm::set_duty(öz.pin, 0.0)
+        öz.attached = yanlış
+    son
+son
+
+// ============================================================================
+// Açı Kontrolü
+// ============================================================================
+
+açık fonksiyon Servo::write(&değişken öz, angle: kesirli) yap
+    eğer değil öz.attached yap
+        dön
+    son
+    
+    // Açıyı sınırla
+    değişken clamped_angle = angle
+    eğer clamped_angle < öz.min_angle yap
+        clamped_angle = öz.min_angle
+    son
+    eğer clamped_angle > öz.max_angle yap
+        clamped_angle = öz.max_angle
+    son
+    
+    // Reverse uygula
+    eğer öz.reversed yap
+        clamped_angle = öz.max_angle - (clamped_angle - öz.min_angle)
+    son
+    
+    // Açıyı PWM'e dönüştür
+    olsun angle_range = öz.max_angle - öz.min_angle
+    olsun us_range = öz.max_us - öz.min_us
+    olsun normalized = (clamped_angle - öz.min_angle) / angle_range
+    olsun us = öz.min_us + (normalized * (us_range olarak kesirli)) olarak tamsayı
+    
+    öz.write_us(us)
+    öz.current_angle = angle
+son
+
+açık fonksiyon Servo::write_us(&değişken öz, us: tamsayı) yap
+    eğer değil öz.attached yap
+        dön
+    son
+    
+    // Sınırları kontrol et
+    değişken clamped_us = us
+    eğer clamped_us < öz.min_us yap
+        clamped_us = öz.min_us
+    son
+    eğer clamped_us > öz.max_us yap
+        clamped_us = öz.max_us
+    son
+    
+    // PWM duty cycle hesapla
+    // 50Hz = 20ms period = 20000μs
+    // duty = us / 20000 * 100%
+    olsun duty_percent = (clamped_us olarak kesirli) / 200.0
+    
+    pwm::set_duty(öz.pin, duty_percent)
+    öz.current_us = clamped_us
+son
+
+// ============================================================================
+// Okuma
+// ============================================================================
+
+açık fonksiyon Servo::read(&öz) -> kesirli yap
+    dön öz.current_angle
+son
+
+açık fonksiyon Servo::read_us(&öz) -> tamsayı yap
+    dön öz.current_us
+son
+
+açık fonksiyon Servo::is_attached(&öz) -> mantıksal yap
+    dön öz.attached
+son
+
+// ============================================================================
+// Konfigürasyon
+// ============================================================================
+
+açık fonksiyon Servo::set_range(&değişken öz, min_angle: kesirli, max_angle: kesirli) yap
+    öz.min_angle = min_angle
+    öz.max_angle = max_angle
+son
+
+açık fonksiyon Servo::set_pulse_range(&değişken öz, min_us: tamsayı, max_us: tamsayı) yap
+    öz.min_us = min_us
+    öz.max_us = max_us
+son
+
+açık fonksiyon Servo::set_reversed(&değişken öz, reversed: mantıksal) yap
+    öz.reversed = reversed
+son
+
+// ============================================================================
+// Hareketler
+// ============================================================================
+
+açık fonksiyon Servo::center(&değişken öz) yap
+    olsun center = (öz.min_angle + öz.max_angle) / 2.0
+    öz.write(center)
+son
+
+açık fonksiyon Servo::move_smooth(
+    &değişken öz,
+    target_angle: kesirli,
+    speed_deg_per_sec: kesirli,
+    step_delay_ms: tamsayı
+) yap
+    olsun current = öz.current_angle
+    olsun diff = target_angle - current
+    olsun step = speed_deg_per_sec * (step_delay_ms olarak kesirli) / 1000.0
+    
+    eğer diff.abs() < step yap
+        öz.write(target_angle)
+        dön
+    son
+    
+    değişken angle = current
+    döngü yap
+        eğer diff > 0.0 yap
+            angle = angle + step
+            eğer angle >= target_angle yap
+                öz.write(target_angle)
+                dön
+            son
+        yoksa yap
+            angle = angle - step
+            eğer angle <= target_angle yap
+                öz.write(target_angle)
+                dön
+            son
+        son
+        
+        öz.write(angle)
+        timer::delay_ms(step_delay_ms)
+    son
+son
+
+// ============================================================================
+// Sweep Test
+// ============================================================================
+
+açık fonksiyon Servo::sweep(&değişken öz, delay_ms: tamsayı) yap
+    yaz("[SERVO] Sweep test - Pin {}", öz.pin)
+    
+    // Min'e git
+    öz.write(öz.min_angle)
+    timer::delay_ms(delay_ms)
+    
+    // Max'a git
+    öz.write(öz.max_angle)
+    timer::delay_ms(delay_ms)
+    
+    // Merkeze dön
+    öz.center()
+    timer::delay_ms(delay_ms)
+    
+    yaz("[SERVO] Sweep complete")
+son
+
+// ============================================================================
+// Kalibrasyon
+// ============================================================================
+
+açık yapı ServoCalibration yap
+    açık min_us: tamsayı,
+    açık center_us: tamsayı,
+    açık max_us: tamsayı,
+    açık min_angle: kesirli,
+    açık max_angle: kesirli
+son
+
+açık fonksiyon Servo::apply_calibration(&değişken öz, cal: &ServoCalibration) yap
+    öz.min_us = cal.min_us
+    öz.max_us = cal.max_us
+    öz.min_angle = cal.min_angle
+    öz.max_angle = cal.max_angle
+son
+
+// ============================================================================
+// Çoklu Servo Kontrolü
+// ============================================================================
+
+açık yapı ServoGroup yap
+    servos: [Servo; 4],
+    count: tamsayı
+son
+
+açık fonksiyon ServoGroup::new() -> ServoGroup yap
+    dön ServoGroup {
+        servos: [
+            Servo::new(0),
+            Servo::new(0),
+            Servo::new(0),
+            Servo::new(0)
+        ],
+        count: 0
+    }
+son
+
+açık fonksiyon ServoGroup::add(&değişken öz, servo: Servo) -> mantıksal yap
+    eğer öz.count >= 4 yap
+        dön yanlış
+    son
+    
+    öz.servos[öz.count] = servo
+    öz.count = öz.count + 1
+    dön doğru
+son
+
+açık fonksiyon ServoGroup::attach_all(&değişken öz) -> Sonuç<(), Hata> yap
+    için i içinde 0..öz.count yap
+        öz.servos[i].attach()?
+    son
+    dön Tamam(())
+son
+
+açık fonksiyon ServoGroup::detach_all(&değişken öz) yap
+    için i içinde 0..öz.count yap
+        öz.servos[i].detach()
+    son
+son
+
+açık fonksiyon ServoGroup::center_all(&değişken öz) yap
+    için i içinde 0..öz.count yap
+        öz.servos[i].center()
+    son
+son

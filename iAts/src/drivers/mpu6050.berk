@@ -1,0 +1,261 @@
+// ============================================================================
+// iAts BERK - MPU6050 Driver
+// ============================================================================
+// 6-axis IMU (Gyro + Accelerometer) I2C driver
+// ============================================================================
+
+modül mpu6050
+
+kullan hal::i2c
+kullan hal::timer
+
+// ============================================================================
+// Register Adresleri
+// ============================================================================
+
+sabit REG_PWR_MGMT_1: bayt = 0x6B
+sabit REG_PWR_MGMT_2: bayt = 0x6C
+sabit REG_SMPLRT_DIV: bayt = 0x19
+sabit REG_CONFIG: bayt = 0x1A
+sabit REG_GYRO_CONFIG: bayt = 0x1B
+sabit REG_ACCEL_CONFIG: bayt = 0x1C
+sabit REG_INT_ENABLE: bayt = 0x38
+sabit REG_INT_STATUS: bayt = 0x3A
+sabit REG_ACCEL_XOUT_H: bayt = 0x3B
+sabit REG_GYRO_XOUT_H: bayt = 0x43
+sabit REG_TEMP_OUT_H: bayt = 0x41
+sabit REG_WHO_AM_I: bayt = 0x75
+
+// Güç modları
+sabit PWR_RESET: bayt = 0x80
+sabit PWR_SLEEP: bayt = 0x40
+sabit PWR_CYCLE: bayt = 0x20
+sabit PWR_CLKSEL_PLL_X: bayt = 0x01
+
+// ============================================================================
+// Ölçeklendirme Faktörleri
+// ============================================================================
+
+// Gyro hassasiyeti (LSB/(°/s))
+sabit GYRO_SCALE_250: kesirli = 131.0
+sabit GYRO_SCALE_500: kesirli = 65.5
+sabit GYRO_SCALE_1000: kesirli = 32.8
+sabit GYRO_SCALE_2000: kesirli = 16.4
+
+// Accelerometer hassasiyeti (LSB/g)
+sabit ACCEL_SCALE_2G: kesirli = 16384.0
+sabit ACCEL_SCALE_4G: kesirli = 8192.0
+sabit ACCEL_SCALE_8G: kesirli = 4096.0
+sabit ACCEL_SCALE_16G: kesirli = 2048.0
+
+// ============================================================================
+// Durum
+// ============================================================================
+
+yapı MPU6050State yap
+    adres: bayt,
+    gyro_scale: kesirli,
+    accel_scale: kesirli,
+    initialized: mantıksal
+son
+
+statik değişken state: MPU6050State = MPU6050State {
+    adres: 0x68,
+    gyro_scale: GYRO_SCALE_250,
+    accel_scale: ACCEL_SCALE_2G,
+    initialized: yanlış
+}
+
+// ============================================================================
+// Başlatma
+// ============================================================================
+
+açık fonksiyon init(
+    adres: bayt,
+    gyro_range: tamsayı,
+    accel_range: tamsayı,
+    dlpf_mode: tamsayı
+) -> Sonuç<(), Hata> yap
+    state.adres = adres
+    
+    // Cihazı sıfırla
+    i2c::write_byte(adres, REG_PWR_MGMT_1, PWR_RESET)?
+    timer::delay_ms(100)
+    
+    // Uyku modundan çık, PLL kullan
+    i2c::write_byte(adres, REG_PWR_MGMT_1, PWR_CLKSEL_PLL_X)?
+    timer::delay_ms(10)
+    
+    // Sample rate divider (1kHz / (1 + div))
+    i2c::write_byte(adres, REG_SMPLRT_DIV, 0x00)?
+    
+    // DLPF yapılandır
+    i2c::write_byte(adres, REG_CONFIG, dlpf_mode olarak bayt)?
+    
+    // Gyro aralığı
+    olsun gyro_config = eşle gyro_range {
+        250 => { state.gyro_scale = GYRO_SCALE_250; 0x00 },
+        500 => { state.gyro_scale = GYRO_SCALE_500; 0x08 },
+        1000 => { state.gyro_scale = GYRO_SCALE_1000; 0x10 },
+        2000 => { state.gyro_scale = GYRO_SCALE_2000; 0x18 },
+        _ => { state.gyro_scale = GYRO_SCALE_250; 0x00 }
+    }
+    i2c::write_byte(adres, REG_GYRO_CONFIG, gyro_config)?
+    
+    // Accelerometer aralığı
+    olsun accel_config = eşle accel_range {
+        2 => { state.accel_scale = ACCEL_SCALE_2G; 0x00 },
+        4 => { state.accel_scale = ACCEL_SCALE_4G; 0x08 },
+        8 => { state.accel_scale = ACCEL_SCALE_8G; 0x10 },
+        16 => { state.accel_scale = ACCEL_SCALE_16G; 0x18 },
+        _ => { state.accel_scale = ACCEL_SCALE_2G; 0x00 }
+    }
+    i2c::write_byte(adres, REG_ACCEL_CONFIG, accel_config)?
+    
+    state.initialized = doğru
+    
+    dön Tamam(())
+son
+
+// ============================================================================
+// Bağlantı Testi
+// ============================================================================
+
+açık fonksiyon test_connection() -> mantıksal yap
+    eşle i2c::read_byte(state.adres, REG_WHO_AM_I) {
+        Tamam(id) => dön id == 0x68,
+        Hata(_) => dön yanlış
+    }
+son
+
+// ============================================================================
+// Veri Okuma
+// ============================================================================
+
+açık fonksiyon read_gyro() -> Sonuç<[kesirli; 3], Hata> yap
+    olsun raw = i2c::read_bytes(state.adres, REG_GYRO_XOUT_H, 6)?
+    
+    olsun x = ((raw[0] olarak i16) << 8) | (raw[1] olarak i16)
+    olsun y = ((raw[2] olarak i16) << 8) | (raw[3] olarak i16)
+    olsun z = ((raw[4] olarak i16) << 8) | (raw[5] olarak i16)
+    
+    dön Tamam([
+        (x olarak kesirli) / state.gyro_scale,
+        (y olarak kesirli) / state.gyro_scale,
+        (z olarak kesirli) / state.gyro_scale
+    ])
+son
+
+açık fonksiyon read_accel() -> Sonuç<[kesirli; 3], Hata> yap
+    olsun raw = i2c::read_bytes(state.adres, REG_ACCEL_XOUT_H, 6)?
+    
+    olsun x = ((raw[0] olarak i16) << 8) | (raw[1] olarak i16)
+    olsun y = ((raw[2] olarak i16) << 8) | (raw[3] olarak i16)
+    olsun z = ((raw[4] olarak i16) << 8) | (raw[5] olarak i16)
+    
+    dön Tamam([
+        (x olarak kesirli) / state.accel_scale,
+        (y olarak kesirli) / state.accel_scale,
+        (z olarak kesirli) / state.accel_scale
+    ])
+son
+
+açık fonksiyon read_all() -> Sonuç<([kesirli; 3], [kesirli; 3]), Hata> yap
+    // Tüm veriyi tek okumada al (daha hızlı)
+    olsun raw = i2c::read_bytes(state.adres, REG_ACCEL_XOUT_H, 14)?
+    
+    olsun ax = ((raw[0] olarak i16) << 8) | (raw[1] olarak i16)
+    olsun ay = ((raw[2] olarak i16) << 8) | (raw[3] olarak i16)
+    olsun az = ((raw[4] olarak i16) << 8) | (raw[5] olarak i16)
+    
+    // Bytes 6-7: Temperature (skip)
+    
+    olsun gx = ((raw[8] olarak i16) << 8) | (raw[9] olarak i16)
+    olsun gy = ((raw[10] olarak i16) << 8) | (raw[11] olarak i16)
+    olsun gz = ((raw[12] olarak i16) << 8) | (raw[13] olarak i16)
+    
+    olsun accel = [
+        (ax olarak kesirli) / state.accel_scale,
+        (ay olarak kesirli) / state.accel_scale,
+        (az olarak kesirli) / state.accel_scale
+    ]
+    
+    olsun gyro = [
+        (gx olarak kesirli) / state.gyro_scale,
+        (gy olarak kesirli) / state.gyro_scale,
+        (gz olarak kesirli) / state.gyro_scale
+    ]
+    
+    dön Tamam((accel, gyro))
+son
+
+açık fonksiyon read_temperature() -> Sonuç<kesirli, Hata> yap
+    olsun raw = i2c::read_bytes(state.adres, REG_TEMP_OUT_H, 2)?
+    
+    olsun temp_raw = ((raw[0] olarak i16) << 8) | (raw[1] olarak i16)
+    
+    // Formül: Temperature = (TEMP_OUT / 340.0) + 36.53
+    olsun temp_c = (temp_raw olarak kesirli) / 340.0 + 36.53
+    
+    dön Tamam(temp_c)
+son
+
+// ============================================================================
+// Güç Yönetimi
+// ============================================================================
+
+açık fonksiyon sleep() -> Sonuç<(), Hata> yap
+    i2c::write_byte(state.adres, REG_PWR_MGMT_1, PWR_SLEEP | PWR_CLKSEL_PLL_X)?
+    dön Tamam(())
+son
+
+açık fonksiyon wake() -> Sonuç<(), Hata> yap
+    i2c::write_byte(state.adres, REG_PWR_MGMT_1, PWR_CLKSEL_PLL_X)?
+    timer::delay_ms(50)
+    dön Tamam(())
+son
+
+// ============================================================================
+// Self-Test
+// ============================================================================
+
+açık fonksiyon self_test() -> Sonuç<mantıksal, Hata> yap
+    yaz("[MPU6050] Self-test başlıyor...")
+    
+    // Normal modda okuma
+    olsun normal_gyro = read_gyro()?
+    olsun normal_accel = read_accel()?
+    
+    // Self-test modunu etkinleştir
+    i2c::write_byte(state.adres, REG_GYRO_CONFIG, 0xE0)?  // Gyro self-test
+    i2c::write_byte(state.adres, REG_ACCEL_CONFIG, 0xE0)? // Accel self-test
+    timer::delay_ms(100)
+    
+    // Self-test modunda okuma
+    olsun st_gyro = read_gyro()?
+    olsun st_accel = read_accel()?
+    
+    // Self-test modunu kapat
+    i2c::write_byte(state.adres, REG_GYRO_CONFIG, 0x00)?
+    i2c::write_byte(state.adres, REG_ACCEL_CONFIG, 0x00)?
+    
+    // Farkları kontrol et (self-test response)
+    // Gerçek uygulamada factory trim değerleriyle karşılaştırılmalı
+    olsun gyro_diff_x = (st_gyro[0] - normal_gyro[0]).abs()
+    olsun gyro_diff_y = (st_gyro[1] - normal_gyro[1]).abs()
+    olsun gyro_diff_z = (st_gyro[2] - normal_gyro[2]).abs()
+    
+    olsun accel_diff_x = (st_accel[0] - normal_accel[0]).abs()
+    olsun accel_diff_y = (st_accel[1] - normal_accel[1]).abs()
+    olsun accel_diff_z = (st_accel[2] - normal_accel[2]).abs()
+    
+    // Self-test geçti mi? (kabaca kontrol)
+    olsun gyro_ok = gyro_diff_x > 0.1 ve gyro_diff_y > 0.1 ve gyro_diff_z > 0.1
+    olsun accel_ok = accel_diff_x > 0.01 ve accel_diff_y > 0.01 ve accel_diff_z > 0.01
+    
+    olsun passed = gyro_ok ve accel_ok
+    
+    yaz("[MPU6050] Self-test {}", eğer passed yap "PASSED" yoksa yap "FAILED" son)
+    
+    dön Tamam(passed)
+son

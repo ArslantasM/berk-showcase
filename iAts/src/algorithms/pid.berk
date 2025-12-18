@@ -1,0 +1,339 @@
+// ============================================================================
+// iAts BERK - PID Controller
+// ============================================================================
+// Anti-windup destekli tam PID kontrolcü
+// ============================================================================
+
+modül pid
+
+kullan std::math
+
+// ============================================================================
+// PID Kontrolcü Yapısı
+// ============================================================================
+
+açık yapı PIDController yap
+    // Kazançlar
+    kp: kesirli,
+    ki: kesirli,
+    kd: kesirli,
+    
+    // Çıkış limitleri
+    output_min: kesirli,
+    output_max: kesirli,
+    
+    // İntegral limitleri (anti-windup)
+    integral_min: kesirli,
+    integral_max: kesirli,
+    
+    // Durum değişkenleri
+    integral: kesirli,
+    prev_error: kesirli,
+    prev_derivative: kesirli,
+    
+    // Çıkış
+    açık output: kesirli,
+    
+    // Türev filtresi katsayısı (0-1, düşük = daha fazla filtreleme)
+    derivative_filter: kesirli,
+    
+    // Son güncelleme zamanı
+    last_update_ms: tamsayı,
+    
+    // Debug bilgileri
+    last_p_term: kesirli,
+    last_i_term: kesirli,
+    last_d_term: kesirli
+son
+
+// ============================================================================
+// Yapıcılar
+// ============================================================================
+
+açık fonksiyon PIDController::new() -> PIDController yap
+    dön PIDController {
+        kp: 1.0,
+        ki: 0.0,
+        kd: 0.0,
+        output_min: -100.0,
+        output_max: 100.0,
+        integral_min: -50.0,
+        integral_max: 50.0,
+        integral: 0.0,
+        prev_error: 0.0,
+        prev_derivative: 0.0,
+        output: 0.0,
+        derivative_filter: 0.8,
+        last_update_ms: 0,
+        last_p_term: 0.0,
+        last_i_term: 0.0,
+        last_d_term: 0.0
+    }
+son
+
+açık fonksiyon PIDController::new_with_config(
+    kp: kesirli,
+    ki: kesirli,
+    kd: kesirli,
+    output_min: kesirli,
+    output_max: kesirli
+) -> PIDController yap
+    // İntegral limitlerini çıkış limitlerinin yarısı yap
+    olsun integral_limit = (output_max - output_min) / 4.0
+    
+    dön PIDController {
+        kp: kp,
+        ki: ki,
+        kd: kd,
+        output_min: output_min,
+        output_max: output_max,
+        integral_min: -integral_limit,
+        integral_max: integral_limit,
+        integral: 0.0,
+        prev_error: 0.0,
+        prev_derivative: 0.0,
+        output: 0.0,
+        derivative_filter: 0.8,
+        last_update_ms: 0,
+        last_p_term: 0.0,
+        last_i_term: 0.0,
+        last_d_term: 0.0
+    }
+son
+
+// ============================================================================
+// Ana Update Fonksiyonu
+// ============================================================================
+
+açık fonksiyon PIDController::update(&değişken öz, error: kesirli) -> kesirli yap
+    // dt = 1 varsay (periyodik çağrı)
+    öz.update_with_dt(error, 1.0)
+son
+
+açık fonksiyon PIDController::update_with_dt(
+    &değişken öz,
+    error: kesirli,
+    dt: kesirli
+) -> kesirli yap
+    // P terimi
+    olsun p_term = öz.kp * error
+    öz.last_p_term = p_term
+    
+    // I terimi (anti-windup ile)
+    öz.integral = öz.integral + error * dt
+    
+    // İntegral clamping (anti-windup)
+    öz.integral = clamp(öz.integral, öz.integral_min, öz.integral_max)
+    
+    olsun i_term = öz.ki * öz.integral
+    öz.last_i_term = i_term
+    
+    // D terimi (filtrelenmiş)
+    olsun derivative = (error - öz.prev_error) / dt
+    
+    // Low-pass filtre uygula
+    olsun filtered_derivative = öz.derivative_filter * derivative + 
+                                (1.0 - öz.derivative_filter) * öz.prev_derivative
+    öz.prev_derivative = filtered_derivative
+    
+    olsun d_term = öz.kd * filtered_derivative
+    öz.last_d_term = d_term
+    
+    // Toplam çıkış
+    değişken output = p_term + i_term + d_term
+    
+    // Çıkış clamping
+    output = clamp(output, öz.output_min, öz.output_max)
+    
+    // Back-calculation anti-windup
+    // Eğer çıkış saturasyondaysa, integral'i düzelt
+    eğer output == öz.output_max ve error > 0.0 yap
+        // Pozitif saturasyon, pozitif hata - integral'i artırma
+        öz.integral = öz.integral - error * dt
+    son
+    eğer output == öz.output_min ve error < 0.0 yap
+        // Negatif saturasyon, negatif hata - integral'i azaltma
+        öz.integral = öz.integral - error * dt
+    son
+    
+    öz.prev_error = error
+    öz.output = output
+    
+    dön output
+son
+
+// ============================================================================
+// Özel Update Modları
+// ============================================================================
+
+// PI kontrolcü (türev yok)
+açık fonksiyon PIDController::update_pi(&değişken öz, error: kesirli, dt: kesirli) -> kesirli yap
+    olsun p_term = öz.kp * error
+    
+    öz.integral = öz.integral + error * dt
+    öz.integral = clamp(öz.integral, öz.integral_min, öz.integral_max)
+    olsun i_term = öz.ki * öz.integral
+    
+    değişken output = p_term + i_term
+    output = clamp(output, öz.output_min, öz.output_max)
+    
+    öz.output = output
+    dön output
+son
+
+// PD kontrolcü (integral yok)
+açık fonksiyon PIDController::update_pd(&değişken öz, error: kesirli, dt: kesirli) -> kesirli yap
+    olsun p_term = öz.kp * error
+    
+    olsun derivative = (error - öz.prev_error) / dt
+    olsun filtered_derivative = öz.derivative_filter * derivative + 
+                                (1.0 - öz.derivative_filter) * öz.prev_derivative
+    öz.prev_derivative = filtered_derivative
+    olsun d_term = öz.kd * filtered_derivative
+    
+    öz.prev_error = error
+    
+    değişken output = p_term + d_term
+    output = clamp(output, öz.output_min, öz.output_max)
+    
+    öz.output = output
+    dön output
+son
+
+// Derivative on measurement (overshoot'u azaltır)
+açık fonksiyon PIDController::update_dom(
+    &değişken öz,
+    error: kesirli,
+    measurement: kesirli,
+    dt: kesirli
+) -> kesirli yap
+    olsun p_term = öz.kp * error
+    
+    öz.integral = öz.integral + error * dt
+    öz.integral = clamp(öz.integral, öz.integral_min, öz.integral_max)
+    olsun i_term = öz.ki * öz.integral
+    
+    // Türevi error yerine measurement'tan al
+    olsun derivative = -(measurement - öz.prev_error) / dt
+    olsun filtered_derivative = öz.derivative_filter * derivative + 
+                                (1.0 - öz.derivative_filter) * öz.prev_derivative
+    öz.prev_derivative = filtered_derivative
+    olsun d_term = öz.kd * filtered_derivative
+    
+    öz.prev_error = measurement
+    
+    değişken output = p_term + i_term + d_term
+    output = clamp(output, öz.output_min, öz.output_max)
+    
+    öz.output = output
+    dön output
+son
+
+// ============================================================================
+// Ayarlar
+// ============================================================================
+
+açık fonksiyon PIDController::set_gains(&değişken öz, kp: kesirli, ki: kesirli, kd: kesirli) yap
+    öz.kp = kp
+    öz.ki = ki
+    öz.kd = kd
+son
+
+açık fonksiyon PIDController::set_output_limits(&değişken öz, min: kesirli, max: kesirli) yap
+    öz.output_min = min
+    öz.output_max = max
+son
+
+açık fonksiyon PIDController::set_integral_limits(&değişken öz, min: kesirli, max: kesirli) yap
+    öz.integral_min = min
+    öz.integral_max = max
+son
+
+açık fonksiyon PIDController::set_derivative_filter(&değişken öz, alpha: kesirli) yap
+    öz.derivative_filter = clamp(alpha, 0.0, 1.0)
+son
+
+// ============================================================================
+// Reset ve Debug
+// ============================================================================
+
+açık fonksiyon PIDController::reset(&değişken öz) yap
+    öz.integral = 0.0
+    öz.prev_error = 0.0
+    öz.prev_derivative = 0.0
+    öz.output = 0.0
+    öz.last_p_term = 0.0
+    öz.last_i_term = 0.0
+    öz.last_d_term = 0.0
+son
+
+açık fonksiyon PIDController::reset_integral(&değişken öz) yap
+    öz.integral = 0.0
+son
+
+açık fonksiyon PIDController::get_terms(&öz) -> (kesirli, kesirli, kesirli) yap
+    dön (öz.last_p_term, öz.last_i_term, öz.last_d_term)
+son
+
+açık fonksiyon PIDController::get_integral(&öz) -> kesirli yap
+    dön öz.integral
+son
+
+// ============================================================================
+// Auto-tune (Ziegler-Nichols)
+// ============================================================================
+
+açık yapı TuningResult yap
+    açık kp: kesirli,
+    açık ki: kesirli,
+    açık kd: kesirli,
+    açık ku: kesirli,    // Ultimate gain
+    açık tu: kesirli     // Ultimate period
+son
+
+// Ziegler-Nichols klasik ayar
+açık fonksiyon calculate_zn_classic(ku: kesirli, tu: kesirli) -> TuningResult yap
+    dön TuningResult {
+        kp: 0.6 * ku,
+        ki: 1.2 * ku / tu,
+        kd: 0.075 * ku * tu,
+        ku: ku,
+        tu: tu
+    }
+son
+
+// Ziegler-Nichols "no overshoot" ayar
+açık fonksiyon calculate_zn_no_overshoot(ku: kesirli, tu: kesirli) -> TuningResult yap
+    dön TuningResult {
+        kp: 0.2 * ku,
+        ki: 0.4 * ku / tu,
+        kd: 0.066 * ku * tu,
+        ku: ku,
+        tu: tu
+    }
+son
+
+// Tyreus-Luyben ayar (daha yumuşak)
+açık fonksiyon calculate_tyreus_luyben(ku: kesirli, tu: kesirli) -> TuningResult yap
+    dön TuningResult {
+        kp: 0.45 * ku,
+        ki: 0.54 * ku / tu,
+        kd: 0.0,  // D terimi yok
+        ku: ku,
+        tu: tu
+    }
+son
+
+// ============================================================================
+// Yardımcı Fonksiyonlar
+// ============================================================================
+
+fonksiyon clamp(value: kesirli, min: kesirli, max: kesirli) -> kesirli yap
+    eğer value < min yap
+        dön min
+    son
+    eğer value > max yap
+        dön max
+    son
+    dön value
+son

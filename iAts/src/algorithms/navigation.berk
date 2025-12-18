@@ -1,0 +1,378 @@
+// ============================================================================
+// iAts BERK - Navigation Utilities
+// ============================================================================
+// GPS tabanlı navigasyon hesaplamaları
+// ============================================================================
+
+modül navigation
+
+kullan std::math
+
+// ============================================================================
+// Sabitler
+// ============================================================================
+
+açık sabit EARTH_RADIUS_M: kesirli = 6371000.0       // Dünya yarıçapı (metre)
+açık sabit EARTH_RADIUS_KM: kesirli = 6371.0         // Dünya yarıçapı (km)
+açık sabit DEG_TO_RAD: kesirli = 0.017453292519943295   // π / 180
+açık sabit RAD_TO_DEG: kesirli = 57.29577951308232      // 180 / π
+açık sabit METERS_PER_NM: kesirli = 1852.0           // Deniz mili → metre
+açık sabit KNOTS_TO_MPS: kesirli = 0.514444          // Knot → m/s
+
+// ============================================================================
+// Koordinat Yapıları
+// ============================================================================
+
+açık yapı GeoPoint yap
+    açık lat: kesirli,   // Enlem (derece)
+    açık lon: kesirli,   // Boylam (derece)
+    açık alt: kesirli    // Yükseklik (metre, deniz seviyesinden)
+son
+
+açık yapı NavResult yap
+    açık distance: kesirli,    // Mesafe (metre)
+    açık azimuth: kesirli,     // Yatay açı (0-360°, kuzey = 0)
+    açık elevation: kesirli,   // Dikey açı (derece)
+    açık bearing: kesirli      // Gerçek yön (0-360°)
+son
+
+// ============================================================================
+// Yapıcılar
+// ============================================================================
+
+açık fonksiyon GeoPoint::new(lat: kesirli, lon: kesirli, alt: kesirli) -> GeoPoint yap
+    dön GeoPoint { lat, lon, alt }
+son
+
+açık fonksiyon GeoPoint::zero() -> GeoPoint yap
+    dön GeoPoint { lat: 0.0, lon: 0.0, alt: 0.0 }
+son
+
+// ============================================================================
+// Mesafe Hesaplamaları
+// ============================================================================
+
+/// Haversine formülü ile iki nokta arası mesafe (metre)
+açık fonksiyon haversine_distance(p1: &GeoPoint, p2: &GeoPoint) -> kesirli yap
+    olsun lat1_rad = p1.lat * DEG_TO_RAD
+    olsun lat2_rad = p2.lat * DEG_TO_RAD
+    olsun delta_lat = (p2.lat - p1.lat) * DEG_TO_RAD
+    olsun delta_lon = (p2.lon - p1.lon) * DEG_TO_RAD
+    
+    olsun a = math::sin(delta_lat / 2.0) * math::sin(delta_lat / 2.0) +
+              math::cos(lat1_rad) * math::cos(lat2_rad) *
+              math::sin(delta_lon / 2.0) * math::sin(delta_lon / 2.0)
+    
+    olsun c = 2.0 * math::atan2(math::sqrt(a), math::sqrt(1.0 - a))
+    
+    dön EARTH_RADIUS_M * c
+son
+
+/// Vincenty formülü (daha doğru, elipsoid modeli)
+açık fonksiyon vincenty_distance(p1: &GeoPoint, p2: &GeoPoint) -> kesirli yap
+    // WGS84 elipsoid parametreleri
+    sabit A: kesirli = 6378137.0          // Ekvator yarıçapı
+    sabit B: kesirli = 6356752.314245     // Kutup yarıçapı
+    sabit F: kesirli = 1.0 / 298.257223563  // Düzleşme
+    
+    olsun lat1 = p1.lat * DEG_TO_RAD
+    olsun lat2 = p2.lat * DEG_TO_RAD
+    olsun L = (p2.lon - p1.lon) * DEG_TO_RAD
+    
+    olsun U1 = math::atan((1.0 - F) * math::tan(lat1))
+    olsun U2 = math::atan((1.0 - F) * math::tan(lat2))
+    
+    olsun sin_U1 = math::sin(U1)
+    olsun cos_U1 = math::cos(U1)
+    olsun sin_U2 = math::sin(U2)
+    olsun cos_U2 = math::cos(U2)
+    
+    değişken lambda = L
+    değişken lambda_p: kesirli = 0.0
+    değişken iter_limit = 100
+    
+    değişken cos_sq_alpha: kesirli = 0.0
+    değişken sin_sigma: kesirli = 0.0
+    değişken cos_sigma: kesirli = 0.0
+    değişken sigma: kesirli = 0.0
+    değişken cos_2_sigma_m: kesirli = 0.0
+    
+    döngü yap
+        olsun sin_lambda = math::sin(lambda)
+        olsun cos_lambda = math::cos(lambda)
+        
+        sin_sigma = math::sqrt(
+            (cos_U2 * sin_lambda) * (cos_U2 * sin_lambda) +
+            (cos_U1 * sin_U2 - sin_U1 * cos_U2 * cos_lambda) *
+            (cos_U1 * sin_U2 - sin_U1 * cos_U2 * cos_lambda)
+        )
+        
+        eğer sin_sigma == 0.0 yap
+            dön 0.0  // Aynı nokta
+        son
+        
+        cos_sigma = sin_U1 * sin_U2 + cos_U1 * cos_U2 * cos_lambda
+        sigma = math::atan2(sin_sigma, cos_sigma)
+        
+        olsun sin_alpha = cos_U1 * cos_U2 * sin_lambda / sin_sigma
+        cos_sq_alpha = 1.0 - sin_alpha * sin_alpha
+        
+        cos_2_sigma_m = eğer cos_sq_alpha != 0.0 yap
+            cos_sigma - 2.0 * sin_U1 * sin_U2 / cos_sq_alpha
+        yoksa yap
+            0.0
+        son
+        
+        olsun C = F / 16.0 * cos_sq_alpha * (4.0 + F * (4.0 - 3.0 * cos_sq_alpha))
+        
+        lambda_p = lambda
+        lambda = L + (1.0 - C) * F * sin_alpha * (
+            sigma + C * sin_sigma * (
+                cos_2_sigma_m + C * cos_sigma * (-1.0 + 2.0 * cos_2_sigma_m * cos_2_sigma_m)
+            )
+        )
+        
+        iter_limit = iter_limit - 1
+        eğer math::abs(lambda - lambda_p) < 1e-12 veya iter_limit == 0 yap
+            kır
+        son
+    son
+    
+    olsun u_sq = cos_sq_alpha * (A * A - B * B) / (B * B)
+    olsun big_A = 1.0 + u_sq / 16384.0 * (4096.0 + u_sq * (-768.0 + u_sq * (320.0 - 175.0 * u_sq)))
+    olsun big_B = u_sq / 1024.0 * (256.0 + u_sq * (-128.0 + u_sq * (74.0 - 47.0 * u_sq)))
+    
+    olsun delta_sigma = big_B * sin_sigma * (
+        cos_2_sigma_m + big_B / 4.0 * (
+            cos_sigma * (-1.0 + 2.0 * cos_2_sigma_m * cos_2_sigma_m) -
+            big_B / 6.0 * cos_2_sigma_m * (-3.0 + 4.0 * sin_sigma * sin_sigma) *
+            (-3.0 + 4.0 * cos_2_sigma_m * cos_2_sigma_m)
+        )
+    )
+    
+    dön B * big_A * (sigma - delta_sigma)
+son
+
+/// Basit düz düzlem yaklaşımı (kısa mesafeler için)
+açık fonksiyon flat_earth_distance(p1: &GeoPoint, p2: &GeoPoint) -> kesirli yap
+    olsun avg_lat = (p1.lat + p2.lat) / 2.0 * DEG_TO_RAD
+    olsun delta_lat = (p2.lat - p1.lat) * DEG_TO_RAD * EARTH_RADIUS_M
+    olsun delta_lon = (p2.lon - p1.lon) * DEG_TO_RAD * EARTH_RADIUS_M * math::cos(avg_lat)
+    
+    dön math::sqrt(delta_lat * delta_lat + delta_lon * delta_lon)
+son
+
+// ============================================================================
+// Yön (Bearing) Hesaplamaları
+// ============================================================================
+
+/// İlk nokradan ikinci noktaya bearing (0-360°)
+açık fonksiyon bearing(p1: &GeoPoint, p2: &GeoPoint) -> kesirli yap
+    olsun lat1 = p1.lat * DEG_TO_RAD
+    olsun lat2 = p2.lat * DEG_TO_RAD
+    olsun delta_lon = (p2.lon - p1.lon) * DEG_TO_RAD
+    
+    olsun x = math::sin(delta_lon) * math::cos(lat2)
+    olsun y = math::cos(lat1) * math::sin(lat2) -
+              math::sin(lat1) * math::cos(lat2) * math::cos(delta_lon)
+    
+    değişken brg = math::atan2(x, y) * RAD_TO_DEG
+    
+    // 0-360 aralığına normalize et
+    eğer brg < 0.0 yap
+        brg = brg + 360.0
+    son
+    
+    dön brg
+son
+
+/// Son bearing (varış noktasındaki yön)
+açık fonksiyon final_bearing(p1: &GeoPoint, p2: &GeoPoint) -> kesirli yap
+    olsun initial = bearing(p2, p1)
+    değişken final = initial + 180.0
+    eğer final >= 360.0 yap
+        final = final - 360.0
+    son
+    dön final
+son
+
+// ============================================================================
+// Yükseklik Açısı (Elevation)
+// ============================================================================
+
+/// Yükseklik açısı hesaplama (derece)
+açık fonksiyon elevation(p1: &GeoPoint, p2: &GeoPoint) -> kesirli yap
+    olsun distance = haversine_distance(p1, p2)
+    olsun alt_diff = p2.alt - p1.alt
+    
+    eğer distance < 1.0 yap
+        dön 0.0
+    son
+    
+    // Dünya eğriliği düzeltmesi
+    olsun earth_curve = (distance * distance) / (2.0 * EARTH_RADIUS_M)
+    olsun corrected_alt = alt_diff - earth_curve
+    
+    dön math::atan2(corrected_alt, distance) * RAD_TO_DEG
+son
+
+/// Elevation limitleri ile
+açık fonksiyon elevation_clamped(
+    p1: &GeoPoint,
+    p2: &GeoPoint,
+    min_deg: kesirli,
+    max_deg: kesirli
+) -> kesirli yap
+    değişken elev = elevation(p1, p2)
+    
+    eğer elev < min_deg yap
+        elev = min_deg
+    son
+    eğer elev > max_deg yap
+        elev = max_deg
+    son
+    
+    dön elev
+son
+
+// ============================================================================
+// Tam Navigasyon Hesabı
+// ============================================================================
+
+/// Bir noktadan diğerine tam navigasyon bilgisi
+açık fonksiyon calculate(from: &GeoPoint, to: &GeoPoint) -> NavResult yap
+    olsun dist = haversine_distance(from, to)
+    olsun brg = bearing(from, to)
+    olsun elev = elevation(from, to)
+    
+    dön NavResult {
+        distance: dist,
+        azimuth: brg,
+        elevation: elev,
+        bearing: brg
+    }
+son
+
+// ============================================================================
+// Projeksiyon
+// ============================================================================
+
+/// Bir noktadan belirli mesafe ve yönde yeni nokta hesapla
+açık fonksiyon destination_point(
+    start: &GeoPoint,
+    distance_m: kesirli,
+    bearing_deg: kesirli
+) -> GeoPoint yap
+    olsun lat1 = start.lat * DEG_TO_RAD
+    olsun lon1 = start.lon * DEG_TO_RAD
+    olsun brng = bearing_deg * DEG_TO_RAD
+    olsun d = distance_m / EARTH_RADIUS_M
+    
+    olsun lat2 = math::asin(
+        math::sin(lat1) * math::cos(d) +
+        math::cos(lat1) * math::sin(d) * math::cos(brng)
+    )
+    
+    olsun lon2 = lon1 + math::atan2(
+        math::sin(brng) * math::sin(d) * math::cos(lat1),
+        math::cos(d) - math::sin(lat1) * math::sin(lat2)
+    )
+    
+    dön GeoPoint {
+        lat: lat2 * RAD_TO_DEG,
+        lon: lon2 * RAD_TO_DEG,
+        alt: start.alt
+    }
+son
+
+// ============================================================================
+// Orta Nokta
+// ============================================================================
+
+/// İki nokta arasındaki orta nokta
+açık fonksiyon midpoint(p1: &GeoPoint, p2: &GeoPoint) -> GeoPoint yap
+    olsun lat1 = p1.lat * DEG_TO_RAD
+    olsun lon1 = p1.lon * DEG_TO_RAD
+    olsun lat2 = p2.lat * DEG_TO_RAD
+    olsun delta_lon = (p2.lon - p1.lon) * DEG_TO_RAD
+    
+    olsun Bx = math::cos(lat2) * math::cos(delta_lon)
+    olsun By = math::cos(lat2) * math::sin(delta_lon)
+    
+    olsun lat3 = math::atan2(
+        math::sin(lat1) + math::sin(lat2),
+        math::sqrt((math::cos(lat1) + Bx) * (math::cos(lat1) + Bx) + By * By)
+    )
+    olsun lon3 = lon1 + math::atan2(By, math::cos(lat1) + Bx)
+    
+    dön GeoPoint {
+        lat: lat3 * RAD_TO_DEG,
+        lon: lon3 * RAD_TO_DEG,
+        alt: (p1.alt + p2.alt) / 2.0
+    }
+son
+
+// ============================================================================
+// Dönüşümler
+// ============================================================================
+
+/// Derece, dakika, saniye'den ondalık dereceye
+açık fonksiyon dms_to_decimal(degrees: tamsayı, minutes: tamsayı, seconds: kesirli) -> kesirli yap
+    dön (degrees olarak kesirli) + 
+           (minutes olarak kesirli) / 60.0 + 
+           seconds / 3600.0
+son
+
+/// Ondalık dereceden derece, dakika, saniyeye
+açık fonksiyon decimal_to_dms(decimal: kesirli) -> (tamsayı, tamsayı, kesirli) yap
+    olsun d = math::abs(decimal)
+    olsun degrees = math::floor(d) olarak tamsayı
+    olsun m = (d - (degrees olarak kesirli)) * 60.0
+    olsun minutes = math::floor(m) olarak tamsayı
+    olsun seconds = (m - (minutes olarak kesirli)) * 60.0
+    
+    dön (degrees, minutes, seconds)
+son
+
+/// Knot'tan m/s'ye
+açık fonksiyon knots_to_mps(knots: kesirli) -> kesirli yap
+    dön knots * KNOTS_TO_MPS
+son
+
+/// m/s'den km/h'ye
+açık fonksiyon mps_to_kmh(mps: kesirli) -> kesirli yap
+    dön mps * 3.6
+son
+
+// ============================================================================
+// Yardımcı Fonksiyonlar
+// ============================================================================
+
+/// Açıyı 0-360 aralığına normalize et
+açık fonksiyon normalize_bearing(bearing: kesirli) -> kesirli yap
+    değişken b = bearing
+    döngü yap
+        eğer b >= 360.0 yap
+            b = b - 360.0
+        yoksa eğer b < 0.0 yap
+            b = b + 360.0
+        yoksa yap
+            kır
+        son
+    son
+    dön b
+son
+
+/// İki açı arasındaki en kısa fark (-180 ile +180 arası)
+açık fonksiyon angle_difference(a1: kesirli, a2: kesirli) -> kesirli yap
+    değişken diff = a2 - a1
+    
+    eğer diff > 180.0 yap
+        diff = diff - 360.0
+    son
+    eğer diff < -180.0 yap
+        diff = diff + 360.0
+    son
+    
+    dön diff
+son

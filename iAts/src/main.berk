@@ -1,0 +1,328 @@
+// ============================================================================
+// iAts BERK - Ana Program
+// ============================================================================
+// Platform: ESP32 / STM32F4
+// Versiyon: 1.0.0
+// ============================================================================
+
+modül main
+
+// Modül importları
+kullan config
+kullan tasks::sensor_task
+kullan tasks::navigation_task
+kullan tasks::servo_task
+kullan tasks::comm_task
+kullan hal::gpio
+kullan hal::i2c
+kullan hal::uart
+kullan hal::pwm
+kullan hal::timer
+kullan std::thread
+kullan std::sync
+
+// ============================================================================
+// Global Durum Yapıları
+// ============================================================================
+
+// Sensör verileri (paylaşımlı)
+yapı SensorData yap
+    // IMU verileri
+    gyro_x: kesirli,
+    gyro_y: kesirli,
+    gyro_z: kesirli,
+    accel_x: kesirli,
+    accel_y: kesirli,
+    accel_z: kesirli,
+    
+    // Pusula verileri
+    mag_x: kesirli,
+    mag_y: kesirli,
+    mag_z: kesirli,
+    
+    // Hesaplanmış açılar
+    heading: kesirli,      // Yön (0-360°)
+    pitch: kesirli,        // Eğim (-90 to +90°)
+    roll: kesirli,         // Yalpa (-180 to +180°)
+    
+    // Zaman damgası
+    timestamp_ms: tamsayı
+son
+
+// GPS/Hedef verileri
+yapı TargetData yap
+    latitude: kesirli,
+    longitude: kesirli,
+    altitude: kesirli,
+    speed: kesirli,
+    course: kesirli,
+    satellites: tamsayı,
+    valid: mantıksal,
+    timestamp_ms: tamsayı
+son
+
+// Navigasyon sonuçları
+yapı NavResult yap
+    target_bearing: kesirli,    // Hedef yönü (°)
+    target_elevation: kesirli,  // Hedef eğimi (°)
+    target_distance: kesirli,   // Hedef mesafesi (m)
+    valid: mantıksal
+son
+
+// Servo komutları
+yapı ServoCommand yap
+    pan_angle: kesirli,
+    tilt_angle: kesirli,
+    pan_speed: kesirli,
+    tilt_speed: kesirli
+son
+
+// Sistem durumu
+yapı SystemStatus yap
+    sensor_ok: mantıksal,
+    gps_ok: mantıksal,
+    nav_ok: mantıksal,
+    servo_ok: mantıksal,
+    bt_connected: mantıksal,
+    battery_voltage: kesirli,
+    uptime_ms: tamsayı
+son
+
+// ============================================================================
+// Görevler Arası İletişim (SPSC Ring Buffers)
+// ============================================================================
+
+// Message bus tanımları
+değişken sensor_buffer: sync::RingBuffer<SensorData, 16>
+değişken target_buffer: sync::RingBuffer<TargetData, 8>
+değişken nav_buffer: sync::RingBuffer<NavResult, 8>
+değişken servo_buffer: sync::RingBuffer<ServoCommand, 8>
+değişken status_buffer: sync::RingBuffer<SystemStatus, 4>
+
+// ============================================================================
+// Sistem Başlatma
+// ============================================================================
+
+fonksiyon sistem_baslat() -> Sonuç<(), Hata> yap
+    yaz("============================================")
+    yaz("   BERK iAts - Anten Takip Sistemi")
+    yaz("   Versiyon: 1.0.0")
+    yaz("============================================")
+    
+    // 1. GPIO başlat
+    yaz("[INIT] GPIO başlatılıyor...")
+    gpio::init()?
+    
+    // LED'leri çıkış olarak ayarla
+    gpio::set_mode(config::PINS.led_data, gpio::Mode::Output)?
+    gpio::set_mode(config::PINS.led_bt, gpio::Mode::Output)?
+    gpio::set_mode(config::PINS.led_gps, gpio::Mode::Output)?
+    
+    // Başlangıçta LED'leri kapat
+    gpio::write(config::PINS.led_data, gpio::Level::Low)?
+    gpio::write(config::PINS.led_bt, gpio::Level::Low)?
+    gpio::write(config::PINS.led_gps, gpio::Level::Low)?
+    
+    // 2. I2C başlat (sensörler için)
+    yaz("[INIT] I2C başlatılıyor...")
+    i2c::init(
+        0,  // I2C bus 0
+        config::PINS.i2c_sda,
+        config::PINS.i2c_scl,
+        i2c::Speed::Fast  // 400kHz
+    )?
+    
+    // 3. UART başlat (GPS/debug için)
+    yaz("[INIT] UART başlatılıyor...")
+    uart::init(
+        1,  // UART1
+        config::PINS.uart_tx,
+        config::PINS.uart_rx,
+        9600  // GPS default baud
+    )?
+    
+    // Debug UART (UART0 - USB)
+    uart::init(0, 1, 3, config::DEBUG_UART_BAUD)?
+    
+    // 4. PWM başlat (servolar için)
+    yaz("[INIT] PWM başlatılıyor...")
+    pwm::init(0, config::PINS.servo_pan, config::SERVO.pwm_freq_hz)?
+    pwm::init(1, config::PINS.servo_tilt, config::SERVO.pwm_freq_hz)?
+    
+    // Servoları merkeze al
+    servo_merkeze_al()?
+    
+    // 5. Sensörleri başlat
+    yaz("[INIT] Sensörler başlatılıyor...")
+    sensor_task::init()?
+    
+    // 6. Bluetooth başlat
+    yaz("[INIT] Bluetooth başlatılıyor...")
+    comm_task::init_bluetooth()?
+    
+    yaz("[INIT] Sistem başlatma tamamlandı!")
+    dön Tamam(())
+son
+
+fonksiyon servo_merkeze_al() -> Sonuç<(), Hata> yap
+    olsun center_duty = pulse_to_duty(config::SERVO.center_pulse_us)
+    
+    pwm::set_duty(0, center_duty)?  // Pan
+    pwm::set_duty(1, center_duty)?  // Tilt
+    
+    timer::delay_ms(500)  // Servoların yerleşmesini bekle
+    
+    dön Tamam(())
+son
+
+fonksiyon pulse_to_duty(pulse_us: tamsayı) -> kesirli yap
+    // 50Hz PWM için duty cycle hesaplama
+    // Period = 20000 µs, duty = pulse_us / 20000 * 100%
+    dön (pulse_us olarak kesirli) / 200.0
+son
+
+// ============================================================================
+// Ana Görev Döngüsü
+// ============================================================================
+
+fonksiyon ana() -> tamsayı yap
+    // Sistem başlatma
+    eşle sistem_baslat() ile
+        Tamam(_) => yaz("[OK] Sistem hazır"),
+        Hata(e) => yap
+            yaz("[HATA] Sistem başlatılamadı: ", e)
+            dön -1
+        son
+    son
+    
+    // Görevleri başlat
+    gorevleri_baslat()
+    
+    // Ana döngü (watchdog ve durum izleme)
+    döngü yap
+        // Sistem durumunu kontrol et
+        sistem_durumu_kontrol()
+        
+        // LED'leri güncelle
+        led_guncelle()
+        
+        // 100ms bekle
+        timer::delay_ms(100)
+    son
+    
+    dön 0
+son
+
+// ============================================================================
+// Görev Yönetimi
+// ============================================================================
+
+fonksiyon gorevleri_baslat() yap
+    yaz("[TASK] Görevler başlatılıyor...")
+    
+    // Görev 1: Sensör okuma (en yüksek öncelik)
+    thread::spawn_with_priority(
+        "sensor_task",
+        config::TASKS.sensor_priority,
+        || yap
+            sensor_task::run(
+                &sensor_buffer,
+                config::TASKS.sensor_period_ms
+            )
+        son
+    )
+    
+    // Görev 2: Navigasyon hesaplama
+    thread::spawn_with_priority(
+        "navigation_task",
+        config::TASKS.navigation_priority,
+        || yap
+            navigation_task::run(
+                &sensor_buffer,
+                &target_buffer,
+                &nav_buffer,
+                config::TASKS.navigation_period_ms
+            )
+        son
+    )
+    
+    // Görev 3: Servo kontrol
+    thread::spawn_with_priority(
+        "servo_task",
+        config::TASKS.servo_priority,
+        || yap
+            servo_task::run(
+                &nav_buffer,
+                &servo_buffer,
+                config::TASKS.servo_period_ms
+            )
+        son
+    )
+    
+    // Görev 4: İletişim (BT + GPS parse)
+    thread::spawn_with_priority(
+        "comm_task",
+        config::TASKS.comm_priority,
+        || yap
+            comm_task::run(
+                &target_buffer,
+                &status_buffer,
+                config::TASKS.comm_period_ms
+            )
+        son
+    )
+    
+    yaz("[TASK] Tüm görevler başlatıldı")
+son
+
+fonksiyon sistem_durumu_kontrol() yap
+    // Status buffer'dan son durumu oku
+    eşle status_buffer.try_read() ile
+        Bazı(status) => yap
+            eğer değil status.sensor_ok yap
+                yaz("[WARN] Sensör hatası!")
+            son
+            
+            eğer değil status.gps_ok yap
+                // GPS sinyal bekleniyor, normal durum
+            son
+            
+            eğer status.battery_voltage < 10.5 yap
+                yaz("[WARN] Düşük batarya: ", status.battery_voltage, "V")
+            son
+        son,
+        Hiçbir => ()  // Veri yok, sorun değil
+    son
+son
+
+fonksiyon led_guncelle() yap
+    // Data LED - sensör verisi alınıyorsa yanıp söner
+    statik değişken data_toggle: mantıksal = yanlış
+    data_toggle = değil data_toggle
+    gpio::write(config::PINS.led_data, 
+        eğer data_toggle ise gpio::Level::High değilse gpio::Level::Low)
+    
+    // BT LED - bağlantı durumu
+    // (comm_task tarafından güncellenir)
+    
+    // GPS LED - GPS fix durumu
+    // (comm_task tarafından güncellenir)
+son
+
+// ============================================================================
+// Yardımcı Fonksiyonlar
+// ============================================================================
+
+fonksiyon debug_log(seviye: tamsayı, mesaj: metin) yap
+    eğer config::DEBUG_ENABLED ve seviye <= config::DEBUG_LOG_LEVEL yap
+        olsun prefix = eşle seviye ile
+            1 => "[ERROR] ",
+            2 => "[WARN]  ",
+            3 => "[INFO]  ",
+            4 => "[DEBUG] ",
+            _ => "[???]   "
+        son
+        
+        yaz(prefix, mesaj)
+    son
+son

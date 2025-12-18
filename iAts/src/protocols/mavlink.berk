@@ -1,0 +1,384 @@
+// ============================================================================
+// iAts BERK - MAVLink Protocol Parser
+// ============================================================================
+// MAVLink v1/v2 protokol çözümleyici (temel mesajlar)
+// ============================================================================
+
+modül mavlink
+
+// ============================================================================
+// MAVLink Sabitler
+// ============================================================================
+
+sabit MAVLINK_V1_STX: bayt = 0xFE
+sabit MAVLINK_V2_STX: bayt = 0xFD
+
+// Mesaj ID'leri
+açık sabit MSG_HEARTBEAT: bayt = 0
+açık sabit MSG_GPS_RAW_INT: bayt = 24
+açık sabit MSG_GLOBAL_POSITION_INT: bayt = 33
+açık sabit MSG_ATTITUDE: bayt = 30
+açık sabit MSG_VFR_HUD: bayt = 74
+
+// ============================================================================
+// Mesaj Yapıları
+// ============================================================================
+
+açık yapı MavlinkMessage yap
+    açık version: bayt,      // 1 veya 2
+    açık len: bayt,          // Payload uzunluğu
+    açık seq: bayt,          // Sequence number
+    açık sysid: bayt,        // System ID
+    açık compid: bayt,       // Component ID
+    açık msgid: tamsayı,     // Message ID
+    açık payload: [bayt; 256],
+    açık checksum: u16
+son
+
+açık yapı GpsRawInt yap
+    açık time_usec: u64,     // Timestamp (μs)
+    açık lat: i32,           // Latitude (degE7)
+    açık lon: i32,           // Longitude (degE7)
+    açık alt: i32,           // Altitude (mm)
+    açık eph: u16,           // GPS HDOP
+    açık epv: u16,           // GPS VDOP
+    açık vel: u16,           // GPS ground speed (cm/s)
+    açık cog: u16,           // Course over ground (cdeg)
+    açık fix_type: bayt,     // GPS fix type
+    açık satellites_visible: bayt
+son
+
+açık yapı GlobalPositionInt yap
+    açık time_boot_ms: u32,
+    açık lat: i32,           // Latitude (degE7)
+    açık lon: i32,           // Longitude (degE7)
+    açık alt: i32,           // Altitude MSL (mm)
+    açık relative_alt: i32,  // Altitude AGL (mm)
+    açık vx: i16,            // Ground X speed (cm/s)
+    açık vy: i16,            // Ground Y speed (cm/s)
+    açık vz: i16,            // Ground Z speed (cm/s)
+    açık hdg: u16            // Heading (cdeg)
+son
+
+açık yapı Attitude yap
+    açık time_boot_ms: u32,
+    açık roll: kesirli,      // Roll (rad)
+    açık pitch: kesirli,     // Pitch (rad)
+    açık yaw: kesirli,       // Yaw (rad)
+    açık rollspeed: kesirli, // Roll rate (rad/s)
+    açık pitchspeed: kesirli,// Pitch rate (rad/s)
+    açık yawspeed: kesirli   // Yaw rate (rad/s)
+son
+
+açık yapı VfrHud yap
+    açık airspeed: kesirli,    // m/s
+    açık groundspeed: kesirli, // m/s
+    açık heading: i16,         // deg (0-360)
+    açık throttle: u16,        // %
+    açık alt: kesirli,         // m (MSL)
+    açık climb: kesirli        // m/s
+son
+
+// ============================================================================
+// Parser State
+// ============================================================================
+
+özel ParseState = enum {
+    WaitingForStart,
+    GotV1Start,
+    GotV2Start,
+    ReadingV1Header,
+    ReadingV2Header,
+    ReadingPayload,
+    ReadingChecksum
+}
+
+yapı ParserState yap
+    state: ParseState,
+    version: bayt,
+    buffer: [bayt; 280],
+    index: tamsayı,
+    expected_len: tamsayı,
+    msg: MavlinkMessage
+son
+
+statik değişken parser: ParserState = ParserState {
+    state: ParseState::WaitingForStart,
+    version: 1,
+    buffer: [0; 280],
+    index: 0,
+    expected_len: 0,
+    msg: MavlinkMessage {
+        version: 1,
+        len: 0,
+        seq: 0,
+        sysid: 0,
+        compid: 0,
+        msgid: 0,
+        payload: [0; 256],
+        checksum: 0
+    }
+}
+
+// ============================================================================
+// Temel Parser
+// ============================================================================
+
+açık fonksiyon parse(data: &[bayt]) -> Sonuç<MavlinkMessage, Hata> yap
+    eğer data.len() < 8 yap
+        dön Hata("Veri çok kısa")
+    son
+    
+    olsun stx = data[0]
+    
+    eğer stx == MAVLINK_V1_STX yap
+        parse_v1(data)
+    yoksa eğer stx == MAVLINK_V2_STX yap
+        parse_v2(data)
+    yoksa yap
+        dön Hata("Geçersiz başlık baytı")
+    son
+son
+
+fonksiyon parse_v1(data: &[bayt]) -> Sonuç<MavlinkMessage, Hata> yap
+    // V1 Header: STX(1) + LEN(1) + SEQ(1) + SYSID(1) + COMPID(1) + MSGID(1)
+    eğer data.len() < 6 yap
+        dön Hata("V1 header çok kısa")
+    son
+    
+    olsun payload_len = data[1] olarak tamsayı
+    olsun total_len = 6 + payload_len + 2  // Header + Payload + Checksum
+    
+    eğer data.len() < total_len yap
+        dön Hata("V1 mesaj eksik")
+    son
+    
+    // Checksum doğrula
+    olsun expected_crc = calculate_crc_v1(&data[1..6+payload_len])
+    olsun received_crc = (data[6+payload_len] olarak u16) | 
+                         ((data[6+payload_len+1] olarak u16) << 8)
+    
+    eğer expected_crc != received_crc yap
+        dön Hata("V1 CRC hatası")
+    son
+    
+    değişken msg = MavlinkMessage {
+        version: 1,
+        len: data[1],
+        seq: data[2],
+        sysid: data[3],
+        compid: data[4],
+        msgid: data[5] olarak tamsayı,
+        payload: [0; 256],
+        checksum: received_crc
+    }
+    
+    // Payload kopyala
+    için i içinde 0..payload_len yap
+        msg.payload[i] = data[6 + i]
+    son
+    
+    dön Tamam(msg)
+son
+
+fonksiyon parse_v2(data: &[bayt]) -> Sonuç<MavlinkMessage, Hata> yap
+    // V2 Header: STX(1) + LEN(1) + INCOMPAT(1) + COMPAT(1) + SEQ(1) + SYSID(1) + COMPID(1) + MSGID(3)
+    eğer data.len() < 10 yap
+        dön Hata("V2 header çok kısa")
+    son
+    
+    olsun payload_len = data[1] olarak tamsayı
+    olsun total_len = 10 + payload_len + 2  // Header + Payload + Checksum
+    
+    eğer data.len() < total_len yap
+        dön Hata("V2 mesaj eksik")
+    son
+    
+    olsun msgid = (data[7] olarak tamsayı) |
+                  ((data[8] olarak tamsayı) << 8) |
+                  ((data[9] olarak tamsayı) << 16)
+    
+    // Checksum doğrula
+    olsun expected_crc = calculate_crc_v2(&data[1..10+payload_len], msgid)
+    olsun received_crc = (data[10+payload_len] olarak u16) |
+                         ((data[10+payload_len+1] olarak u16) << 8)
+    
+    eğer expected_crc != received_crc yap
+        dön Hata("V2 CRC hatası")
+    son
+    
+    değişken msg = MavlinkMessage {
+        version: 2,
+        len: data[1],
+        seq: data[4],
+        sysid: data[5],
+        compid: data[6],
+        msgid: msgid,
+        payload: [0; 256],
+        checksum: received_crc
+    }
+    
+    // Payload kopyala
+    için i içinde 0..payload_len yap
+        msg.payload[i] = data[10 + i]
+    son
+    
+    dön Tamam(msg)
+son
+
+// ============================================================================
+// Mesaj Decode
+// ============================================================================
+
+açık fonksiyon decode_gps_raw_int(msg: &MavlinkMessage) -> GpsRawInt yap
+    olsun p = &msg.payload
+    
+    dön GpsRawInt {
+        time_usec: read_u64(p, 0),
+        lat: read_i32(p, 8),
+        lon: read_i32(p, 12),
+        alt: read_i32(p, 16),
+        eph: read_u16(p, 20),
+        epv: read_u16(p, 22),
+        vel: read_u16(p, 24),
+        cog: read_u16(p, 26),
+        fix_type: p[28],
+        satellites_visible: p[29]
+    }
+son
+
+açık fonksiyon decode_global_position_int(msg: &MavlinkMessage) -> GlobalPositionInt yap
+    olsun p = &msg.payload
+    
+    dön GlobalPositionInt {
+        time_boot_ms: read_u32(p, 0),
+        lat: read_i32(p, 4),
+        lon: read_i32(p, 8),
+        alt: read_i32(p, 12),
+        relative_alt: read_i32(p, 16),
+        vx: read_i16(p, 20),
+        vy: read_i16(p, 22),
+        vz: read_i16(p, 24),
+        hdg: read_u16(p, 26)
+    }
+son
+
+açık fonksiyon decode_attitude(msg: &MavlinkMessage) -> Attitude yap
+    olsun p = &msg.payload
+    
+    dön Attitude {
+        time_boot_ms: read_u32(p, 0),
+        roll: read_f32(p, 4),
+        pitch: read_f32(p, 8),
+        yaw: read_f32(p, 12),
+        rollspeed: read_f32(p, 16),
+        pitchspeed: read_f32(p, 20),
+        yawspeed: read_f32(p, 24)
+    }
+son
+
+açık fonksiyon decode_vfr_hud(msg: &MavlinkMessage) -> VfrHud yap
+    olsun p = &msg.payload
+    
+    dön VfrHud {
+        airspeed: read_f32(p, 0),
+        groundspeed: read_f32(p, 4),
+        heading: read_i16(p, 8),
+        throttle: read_u16(p, 10),
+        alt: read_f32(p, 12),
+        climb: read_f32(p, 16)
+    }
+son
+
+// ============================================================================
+// CRC Hesaplama
+// ============================================================================
+
+sabit X25_INIT_CRC: u16 = 0xFFFF
+sabit X25_VALIDATE_CRC: u16 = 0xF0B8
+
+// CRC-16/MCRF4XX lookup table
+sabit CRC_TABLE: [u16; 256] = [
+    0x0000, 0x1189, 0x2312, 0x329b, 0x4624, 0x57ad, 0x6536, 0x74bf,
+    // ... (kısaltılmış, tam tablo kullanılmalı)
+    0x8c01, 0x9d88, 0xaf13, 0xbe9a, 0xca25, 0xdbac, 0xe937, 0xf8be
+    // ...
+]
+
+fonksiyon crc_accumulate(byte: bayt, crc: u16) -> u16 yap
+    olsun tmp = byte ^ (crc olarak bayt)
+    dön (crc >> 8) ^ CRC_TABLE[tmp olarak tamsayı]
+son
+
+fonksiyon calculate_crc_v1(data: &[bayt]) -> u16 yap
+    değişken crc = X25_INIT_CRC
+    
+    için byte içinde data yap
+        crc = crc_accumulate(*byte, crc)
+    son
+    
+    // CRC extra byte (mesaj tipine göre)
+    // Gerçek uygulamada msg_id'ye göre belirlenir
+    crc = crc_accumulate(0, crc)
+    
+    dön crc
+son
+
+fonksiyon calculate_crc_v2(data: &[bayt], msgid: tamsayı) -> u16 yap
+    değişken crc = X25_INIT_CRC
+    
+    için byte içinde data yap
+        crc = crc_accumulate(*byte, crc)
+    son
+    
+    // CRC extra byte (mesaj tipine göre)
+    olsun crc_extra = get_crc_extra(msgid)
+    crc = crc_accumulate(crc_extra, crc)
+    
+    dön crc
+son
+
+fonksiyon get_crc_extra(msgid: tamsayı) -> bayt yap
+    eşle msgid {
+        0 => dön 50,    // HEARTBEAT
+        24 => dön 24,   // GPS_RAW_INT
+        33 => dön 104,  // GLOBAL_POSITION_INT
+        30 => dön 39,   // ATTITUDE
+        74 => dön 20,   // VFR_HUD
+        _ => dön 0
+    }
+son
+
+// ============================================================================
+// Binary Okuma Yardımcıları
+// ============================================================================
+
+fonksiyon read_u16(data: &[bayt], offset: tamsayı) -> u16 yap
+    dön (data[offset] olarak u16) |
+           ((data[offset + 1] olarak u16) << 8)
+son
+
+fonksiyon read_i16(data: &[bayt], offset: tamsayı) -> i16 yap
+    dön read_u16(data, offset) olarak i16
+son
+
+fonksiyon read_u32(data: &[bayt], offset: tamsayı) -> u32 yap
+    dön (data[offset] olarak u32) |
+           ((data[offset + 1] olarak u32) << 8) |
+           ((data[offset + 2] olarak u32) << 16) |
+           ((data[offset + 3] olarak u32) << 24)
+son
+
+fonksiyon read_i32(data: &[bayt], offset: tamsayı) -> i32 yap
+    dön read_u32(data, offset) olarak i32
+son
+
+fonksiyon read_u64(data: &[bayt], offset: tamsayı) -> u64 yap
+    dön (read_u32(data, offset) olarak u64) |
+           ((read_u32(data, offset + 4) olarak u64) << 32)
+son
+
+fonksiyon read_f32(data: &[bayt], offset: tamsayı) -> kesirli yap
+    olsun bits = read_u32(data, offset)
+    dön kesirli::from_bits(bits)
+son
