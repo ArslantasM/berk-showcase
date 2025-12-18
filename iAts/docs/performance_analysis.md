@@ -2,7 +2,7 @@
 
 Bu doküman, iAts antenna tracker projesinin orijinal Arduino implementasyonu ile BERK ile yeniden yazılmış ESP32 versiyonunun karşılaştırmalı performans analizini sunar.
 
-## 📊 Platform Karşılaştırması
+##  Platform Karşılaştırması
 
 ### Donanım Özellikleri
 
@@ -31,7 +31,7 @@ Bu doküman, iAts antenna tracker projesinin orijinal Arduino implementasyonu il
 | Float İşlem | ~1000 cycle | ~1 cycle (FPU) | **~1000x** |
 | 32-bit Çarpma | ~100 cycle | 1 cycle | **100x** |
 
-## 🔢 Algoritmik Performans
+##  Algoritmik Performans
 
 ### Kalman Filtre Hesaplaması
 
@@ -81,7 +81,7 @@ Tek iterasyon için tahmini cycle sayıları:
 - Jitter: ±0.1 μs
 - Max servo: 16 bağımsız kanal
 
-## ⏱️ Gerçek Zamanlı Performans
+##  Gerçek Zamanlı Performans
 
 ### Görev Zamanlaması (RTOS Semantiği)
 
@@ -142,7 +142,7 @@ Task: comm_task (50ms period)
 
 Ek olarak, Arduino'da polling loop nedeniyle worst-case gecikme 50ms'ye çıkabilir. BERK'te RTOS garantili 5ms + 10ms + 20ms = 35ms worst-case (deterministik).
 
-## 💾 Bellek Kullanımı
+##  Bellek Kullanımı
 
 ### Arduino Pro Mini
 
@@ -186,7 +186,7 @@ Flash: 4MB (4,194,304 bytes)
 ✅ Genişleme potansiyeli
 ```
 
-## 🔌 Güç Tüketimi
+##  Güç Tüketimi
 
 | Mod | Arduino + HC-05 | ESP32 |
 |-----|-----------------|-------|
@@ -204,7 +204,7 @@ ESP32'nin aktif modda daha fazla çektiği güç, daha hızlı işlem süresiyle
 
 **Enerji Verimliliği: ~62x daha iyi** (aktif süre bazlı)
 
-## 📈 Özellik Karşılaştırması
+##  Özellik Karşılaştırması
 
 | Özellik | Arduino iAts | BERK iAts |
 |---------|--------------|-----------|
@@ -222,7 +222,7 @@ ESP32'nin aktif modda daha fazla çektiği güç, daha hızlı işlem süresiyle
 | Failsafe | Temel | Gelişmiş |
 | Telemetri | Tek yönlü | Çift yönlü |
 
-## 🧪 Benchmark Sonuçları
+##  Benchmark Sonuçları
 
 ### Sentetik Testler
 
@@ -259,7 +259,7 @@ ESP32'nin aktif modda daha fazla çektiği güç, daha hızlı işlem süresiyle
 | Smooth Motion | Adım adım | Sürekli |
 | Lost Lock Events | 3/min | 0/min |
 
-## 📋 Sonuç
+##  Sonuç
 
 | Kategori | Kazanç |
 |----------|--------|
