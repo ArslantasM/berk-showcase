@@ -2,7 +2,7 @@
 
 Bu doküman, iAts antenna tracker için özel PCB tasarım kılavuzunu içerir.
 
-## 📐 PCB Genel Özellikleri
+##  PCB Genel Özellikleri
 
 | Özellik | Değer |
 |---------|-------|
@@ -16,7 +16,7 @@ Bu doküman, iAts antenna tracker için özel PCB tasarım kılavuzunu içerir.
 
 ---
 
-## 🔲 PCB Üst Katman Yerleşimi (Top Layer)
+##  PCB Üst Katman Yerleşimi (Top Layer)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -88,7 +88,7 @@ Bu doküman, iAts antenna tracker için özel PCB tasarım kılavuzunu içerir.
 
 ---
 
-## 🔌 Detaylı Pin Bağlantı Diyagramı
+##  Detaylı Pin Bağlantı Diyagramı
 
 ```
                                     ┌──────────────────────────────────────┐
@@ -160,7 +160,7 @@ Bu doküman, iAts antenna tracker için özel PCB tasarım kılavuzunu içerir.
 
 ---
 
-## 📊 I2C Bus Topolojisi
+##  I2C Bus Topolojisi
 
 ```
                            ┌─────────────────────────────────────────────┐
@@ -196,7 +196,7 @@ Bu doküman, iAts antenna tracker için özel PCB tasarım kılavuzunu içerir.
 
 ---
 
-## ⚡ Güç Dağıtım Şeması
+##  Güç Dağıtım Şeması
 
 ```
                          ┌─────────────────────────────────────────────────────┐
@@ -259,7 +259,7 @@ Bu doküman, iAts antenna tracker için özel PCB tasarım kılavuzunu içerir.
 
 ---
 
-## 🔧 Konektör Pin Çıkışları
+##  Konektör Pin Çıkışları
 
 ### GPS Konektörü (JST-PH 4-Pin)
 
@@ -319,7 +319,7 @@ Bu doküman, iAts antenna tracker için özel PCB tasarım kılavuzunu içerir.
 
 ---
 
-## 📏 PCB Alt Katman (Bottom Layer)
+##  PCB Alt Katman (Bottom Layer)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -363,7 +363,7 @@ Bu doküman, iAts antenna tracker için özel PCB tasarım kılavuzunu içerir.
 
 ---
 
-## 📋 BOM (Bill of Materials)
+##  BOM (Bill of Materials)
 
 | # | Bileşen | Değer/Model | Footprint | Adet | Notlar |
 |---|---------|-------------|-----------|------|--------|
@@ -467,7 +467,7 @@ Bu doküman, iAts antenna tracker için özel PCB tasarım kılavuzunu içerir.
 
 ---
 
-## 🧪 Test Prosedürü
+##  Test Prosedürü
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -515,7 +515,7 @@ Bu doküman, iAts antenna tracker için özel PCB tasarım kılavuzunu içerir.
 
 ---
 
-## 📦 Kasa Montajı
+##  Kasa Montajı
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
