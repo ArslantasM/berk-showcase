@@ -1,6 +1,6 @@
 # iAts - BERK ile Yeniden Tasarım
 
-## 📋 Proje Özeti
+##  Proje Özeti
 
 Bu döküman, [iAts (Arduino Antenna Tracking System)](https://github.com/akari-tun/iAts) açık kaynak projesinin BERK programlama dili ile nasıl modernize edilebileceğini ve iyileştirilebileceğini detaylı olarak açıklar.
 
@@ -11,7 +11,7 @@ Bu döküman, [iAts (Arduino Antenna Tracking System)](https://github.com/akari-
 
 ---
 
-## 📡 iAts Nedir?
+##  iAts Nedir?
 
 iAts (intelligent Antenna tracking System), FPV (First Person View) uçuşları için tasarlanmış otomatik anten takip sistemidir (AAT - Automatic Antenna Tracker).
 
@@ -64,7 +64,7 @@ iAts (intelligent Antenna tracking System), FPV (First Person View) uçuşları 
 
 ---
 
-## 🔍 Mevcut Sistemin Analizi
+##  Mevcut Sistemin Analizi
 
 ### Yazılım Mimarisi (C++)
 
@@ -108,7 +108,7 @@ void loop() {
 
 ---
 
-## 🚀 BERK ile İyileştirme Stratejisi
+##  BERK ile İyileştirme Stratejisi
 
 ### Aşama 1: Platform Yükseltme
 
@@ -163,7 +163,7 @@ STM32F411 (32-bit, 100MHz, 128KB RAM, HW FPU)
 
 ---
 
-## 📁 Proje Dosya Yapısı
+##  Proje Dosya Yapısı
 
 ```
 iAts/
@@ -200,7 +200,7 @@ iAts/
 
 ---
 
-## 📊 Beklenen Kazanımlar
+##  Beklenen Kazanımlar
 
 ### Performans İyileştirmeleri
 
@@ -236,7 +236,7 @@ iAts/
 
 ---
 
-## 🔗 İlgili Dosyalar
+##  İlgili Dosyalar
 
 - [Prototip Kaynak Kodları](src/)
 - [Donanım Şeması](docs/hardware_schematic.md)
@@ -245,7 +245,7 @@ iAts/
 
 ---
 
-## 📝 Lisans
+##  Lisans
 
 Bu proje GPL-3.0 lisansı altındadır (orijinal iAts projesiyle uyumlu).
 
